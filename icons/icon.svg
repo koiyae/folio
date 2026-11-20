@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#e8e7e0"/>
+  <defs>
+    <filter id="s" x="-20%" y="-20%" width="140%" height="160%"><feGaussianBlur stdDeviation="9"/></filter>
+  </defs>
+  <g opacity=".22" filter="url(#s)" fill="#0a0a12" transform="translate(16 30)">
+    <rect x="118" y="132" width="46" height="250"/><rect x="170" y="120" width="40" height="262"/><rect x="216" y="112" width="132" height="270"/><rect x="354" y="140" width="40" height="242"/>
+  </g>
+  <rect x="118" y="132" width="46" height="250" fill="#c3263c"/>
+  <rect x="170" y="120" width="40" height="262" fill="#3f434b"/>
+  <rect x="216" y="112" width="132" height="270" fill="#24362e"/>
+  <g fill="none" stroke="#d9ab5f" stroke-width="3">
+    <circle cx="282" cy="262" r="16"/><circle cx="282" cy="262" r="30"/><circle cx="282" cy="262" r="44"/>
+  </g>
+  <rect x="234" y="140" width="62" height="7" fill="#d9ab5f"/>
+  <rect x="354" y="140" width="40" height="242" fill="#d6be74"/>
+  <rect x="222" y="112" width="5" height="270" fill="#000" opacity=".18"/>
+</svg>

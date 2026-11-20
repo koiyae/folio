@@ -1,0 +1,20 @@
+{
+  "name": "Folio — PDF library",
+  "short_name": "Folio",
+  "description": "A 3D bookshelf and reader for your own PDFs, with highlighter and pen. Works offline; files never leave the device.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#e8e7e0",
+  "theme_color": "#e8e7e0",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ],
+  "file_handlers": [
+    { "action": "./", "accept": { "application/pdf": [".pdf"] } }
+  ]
+}
