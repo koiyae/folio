@@ -70,8 +70,8 @@ export class UI {
 
     // reader bar
     const r = () => app.reader;
-    $('rb-prev').addEventListener('click', () => r().stepPage(-1));
-    $('rb-next').addEventListener('click', () => r().stepPage(+1));
+    $('rb-prev').addEventListener('click', () => r().prev());
+    $('rb-next').addEventListener('click', () => r().next());
     $('rb-close').addEventListener('click', () => r().close());
     $('rb-bookmark').addEventListener('click', () => r().toggleBookmark());
     $('rb-undo').addEventListener('click', () => r().undo());

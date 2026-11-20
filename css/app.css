@@ -399,13 +399,6 @@ body[data-mode='reading'] .esc-hint {
   white-space: nowrap;
   transition: opacity 0.35s ease, transform 0.35s ease;
 }
-/* zoomed in, text runs under the bar: give it a ground of its own */
-body[data-zoomed] #readerbar {
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 0 0 1px var(--soft);
-}
 #readerbar[hidden] {
   display: flex !important;
   opacity: 0;
