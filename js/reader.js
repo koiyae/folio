@@ -21,7 +21,27 @@ import {
 } from './anim.js';
 
 const DEG = Math.PI / 180;
-const READ_PITCH = -22 * DEG;
+const READ_PITCH = -22 * DEG; // default lean of the open book (reference value)
+// the reader can lean it further back or stand it up a little with a vertical swipe
+const TILT_MIN = -38 * DEG;
+const TILT_MAX = -6 * DEG;
+const TILT_PER_PX = 0.1 * DEG;
+const TILT_KEY = 'folio.readTilt';
+
+function loadTilt() {
+  try {
+    const v = parseFloat(localStorage.getItem(TILT_KEY));
+    if (Number.isFinite(v)) return clamp(v * DEG, TILT_MIN, TILT_MAX);
+  } catch {}
+  return READ_PITCH;
+}
+
+/** Past either end the book still gives a little, then springs back on release. */
+function rubberTilt(t) {
+  if (t > TILT_MAX) return TILT_MAX + Math.min(4 * DEG, (t - TILT_MAX) * 0.25);
+  if (t < TILT_MIN) return TILT_MIN - Math.min(4 * DEG, (TILT_MIN - t) * 0.25);
+  return t;
+}
 const POOL = 18;
 const OPEN = { lift: 0.42, travelAt: 0.3, travel: 1.15, coverAt: 0.5, cover: 1.0, gapAt: 0.15, gap: 1.0, fanAt: 1.42 };
 const CLOSE = { swing: 0.55, travelAt: 0.22, travel: 0.8, settleAt: 0.95, settle: 0.45, gapAt: 0.35, gap: 0.9, done: 1.45 };
@@ -70,6 +90,7 @@ export class Reader {
     this.parallax = { x: 0, y: 0, tx: 0, ty: 0, vx: { v: 0 }, vy: { v: 0 } };
     this.raycaster = new THREE.Raycaster();
     this.lastTap = { t: 0, x: 0, y: 0 };
+    this.tilt = loadTilt(); // the reader's chosen lean, kept between books and sessions
     this.poses = { a: pose(), b: pose(), c: pose(), out: pose(), from: pose() };
   }
 
@@ -254,7 +275,7 @@ export class Reader {
     const availH = Math.max(100, bottom - top);
     const availW = W * (W < 700 ? 0.97 : 0.94);
     const openW = 2 * (d.Wp + d.ov) + 0.3;
-    const projH = d.Hc * Math.cos(READ_PITCH) + d.tp * 0.4 + 0.8;
+    const projH = d.Hc * Math.cos(this.tilt) + d.tp * 0.4 + 0.8;
     const need = Math.max(projH / ((2 * tanH * availH) / H), openW / ((2 * tanH * (W / H) * availW) / W));
     const base = app.cameraBase;
     const dMax = base.z - SHELF_Z + 3; // never behind the shelf's shadow wall
@@ -278,7 +299,7 @@ export class Reader {
     const d = this.d;
     const z = this.zoom;
     // flatten the tilt when zoomed in so text is not foreshortened
-    const pitch = lerp(READ_PITCH, -5 * DEG, smoothstep(1.02, 1.7, z)) + this.parallax.y * 5 * DEG;
+    const pitch = lerp(this.tilt, -5 * DEG, smoothstep(1.02, 1.7, z)) + this.parallax.y * 5 * DEG;
     const yaw = this.parallax.x * 3 * DEG;
     out.quat.setFromEuler(_e.set(pitch, yaw, 0, 'YXZ'));
     out.scale = fit.scale;
@@ -350,7 +371,8 @@ export class Reader {
       // reading
       this.readPose(P.c);
       const r = this.root;
-      const k = 1 - Math.exp(-dt * 10);
+      const tilting = this.gesture && this.gesture.mode === 'tilt';
+      const k = 1 - Math.exp(-dt * (tilting ? 24 : 10));
       r.position.lerp(P.c.pos, k);
       r.quaternion.slerp(P.c.quat, k);
       r.scale.setScalar(lerp(r.scale.x, P.c.scale, k));
@@ -905,6 +927,7 @@ export class Reader {
         this.drawing = null;
       }
       this.releaseDrag(true);
+      this.tilt = clamp(this.tilt, TILT_MIN, TILT_MAX);
       const [a, b] = [...this.pointers.values()];
       this.gesture = {
         mode: 'pinch',
@@ -936,7 +959,8 @@ export class Reader {
 
     const hit = this.hitPage(e.clientX, e.clientY);
     const zoomed = this.zoomTarget > 1.05;
-    if (hit && hit.uvx > 0.78 && !zoomed && !this.fan) {
+    // a mouse can grab the fore-edge at once; a finger first shows which way it is going (sideways turns, up/down tilts)
+    if (hit && hit.uvx > 0.78 && !zoomed && !this.fan && e.pointerType !== 'touch') {
       // grabbed near the fore-edge: lift the leaf right away
       const dir = hit.front ? +1 : -1;
       if (this.startDrag(dir, e.clientX, e.clientY)) {
@@ -1005,7 +1029,18 @@ export class Reader {
           g.mode = 'turn';
           this.updateDrag(e.clientX, e.clientY);
         } else g.mode = 'none';
+      } else if (!this.fan) {
+        // up/down: lean the book back or stand it up
+        g.mode = 'tilt';
+        g.tilt0 = this.tilt;
+        g.dy0 = dy;
+        this.hover.target = 0;
       } else g.mode = 'none';
+    }
+    if (g.mode === 'tilt') {
+      this.tilt = rubberTilt(g.tilt0 + (dy - g.dy0) * TILT_PER_PX);
+      this.app.invalidate();
+      return;
     }
     if (g.mode === 'pan') {
       const wpp = this.worldPerPx(this.zoomTarget);
@@ -1032,6 +1067,15 @@ export class Reader {
     }
     if (g && g.mode === 'pinch') {
       if (this.pointers.size < 2) this.gesture = this.pointers.size ? { mode: 'none' } : null;
+      return;
+    }
+    if (g && g.mode === 'tilt') {
+      this.tilt = clamp(this.tilt, TILT_MIN, TILT_MAX);
+      try {
+        localStorage.setItem(TILT_KEY, String(Math.round((this.tilt / DEG) * 10) / 10));
+      } catch {}
+      this.gesture = null;
+      this.app.invalidate();
       return;
     }
     if (g && g.mode === 'turn') {
