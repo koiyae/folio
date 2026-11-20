@@ -59,11 +59,13 @@ export class UI {
     $('panel-close').addEventListener('click', () => this.closePanel());
     $('pill-open').addEventListener('click', (e) => {
       e.stopPropagation();
+      if (app.suppressPillClick) return void (app.suppressPillClick = false);
       this.hidePills();
       app.openSelected();
     });
     $('pill-details').addEventListener('click', (e) => {
       e.stopPropagation();
+      if (app.suppressPillClick) return void (app.suppressPillClick = false);
       this.hidePills();
       this.openDetails(app.currentMeta());
     });
@@ -76,6 +78,7 @@ export class UI {
     $('rb-bookmark').addEventListener('click', () => r().toggleBookmark());
     $('rb-undo').addEventListener('click', () => r().undo());
     $('rb-mag').addEventListener('click', () => app.toggleMagnifier());
+    $('rb-hand').addEventListener('click', () => r().toggleHand());
     for (const id of ['rb-pink', 'rb-yellow', 'rb-pen', 'rb-eraser']) {
       $(id).addEventListener('click', (e) => r().setTool(e.currentTarget.dataset.tool));
     }
@@ -221,6 +224,8 @@ export class UI {
     $('rb-prev').disabled = !s.canPrev;
     $('rb-next').disabled = !s.canNext;
     $('rb-undo').disabled = !s.undo;
+    $('rb-hand').setAttribute('aria-pressed', String(!!s.hand));
+    $('rb-hand').setAttribute('aria-label', s.hand ? 'Stop turning the book by hand' : 'Turn the book by hand');
     for (const [id, tool] of [
       ['rb-pink', 'pink'],
       ['rb-yellow', 'yellow'],
@@ -307,6 +312,8 @@ export class UI {
          <span>B</span><span>Bookmark spread</span>
          <span>+ − 0</span><span>Zoom</span>
          <span>M</span><span>Magnifier</span>
+         <span>Drag</span><span>Pick up the face-out book and turn it; while reading, drag off the pages</span>
+         <span>R</span><span>Hand mode: every drag turns the open book (Esc squares it up)</span>
          <span>⌘Z</span><span>Undo mark</span>
        </div></section>`,
     );
