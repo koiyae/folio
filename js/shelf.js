@@ -9,7 +9,6 @@ import {
   makeSpineCanvas,
 } from './textures.js';
 import { clamp, smoothDamp, smoothstep } from './anim.js';
-import { RotationHandle } from './handle.js';
 import * as store from './store.js';
 
 export const SHELF_Z = -36; // spine plane
@@ -17,11 +16,6 @@ const FACE_PULL = 5; // face-out book comes forward this much
 const SPINE_GAP = 0.36;
 const FACE_GAP = 0.7;
 const S = SHELF_SCALE;
-const _qYaw = new THREE.Quaternion();
-const _up = new THREE.Vector3(0, 1, 0);
-// boards swing open by inertia when a book is spun (reference: 0.037 × 1.6 × speed, back 1.5×, ≤ 0.35 × 80°)
-const FLAP_GAIN = 0.037 * 1.6;
-const FLAP_MAX = 0.35 * ((80 * Math.PI) / 180);
 
 export class Shelf {
   constructor(app) {
@@ -90,26 +84,7 @@ export class Shelf {
     model.group.position.copy(d.center).multiplyScalar(-1);
     slot.add(model.group);
     this.group.add(slot);
-    const e = {
-      meta,
-      d,
-      look,
-      tex,
-      mats,
-      model,
-      slot,
-      yaw: Math.PI / 2,
-      yawV: { v: 0 },
-      coverState: 'none',
-      x: 0,
-      z: SHELF_Z,
-      // grab-and-turn: spin persists while selected, the tilt eases back (2 s mouse / 0.6 s touch)
-      handle: new RotationHandle({ settle: 'pitch', delayMouse: 2, delayTouch: 0.6, settleTime: 1.6 }),
-      flapF: 0,
-      flapB: 0,
-      flapFV: { v: 0 },
-      flapBV: { v: 0 },
-    };
+    const e = { meta, d, look, tex, mats, model, slot, yaw: Math.PI / 2, yawV: { v: 0 }, coverState: 'none', x: 0, z: SHELF_Z };
     for (const m of model.pickables()) m.userData.entry = e;
     return e;
   }
@@ -294,8 +269,6 @@ export class Shelf {
     // selection follows the nearest book
     const sel = clamp(Math.round(pc), 0, n - 1);
     if (sel !== this.selected) {
-      const prev = this.entries[this.selected];
-      if (prev && prev !== this.entries[sel]) prev.handle.home(this.app.clock);
       this.selected = sel;
       this.onSelect && this.onSelect(this.entries[sel], sel);
     }
@@ -344,45 +317,10 @@ export class Shelf {
       e.x = xi;
       e.z = SHELF_Z + FACE_PULL * Math.max(0, face) - halfDepth;
       e.slot.position.set(xi, 0, e.z);
-      // shelf yaw, then whatever the reader's hand has done to it (about screen axes)
-      if (e.handle.update(dt, this.app.clock)) moving = true;
-      _qYaw.setFromAxisAngle(_up, e.yaw);
-      e.slot.quaternion.multiplyQuaternions(e.handle.q, _qYaw);
-      const fT = clamp(FLAP_GAIN * e.handle.spin, 0, FLAP_MAX);
-      const bT = clamp(-FLAP_GAIN * 1.5 * e.handle.spin, 0, FLAP_MAX);
-      if (dt > 0 && (e.flapF > 1e-4 || e.flapB > 1e-4 || fT > 0 || bT > 0)) {
-        e.flapF = smoothDamp(e.flapF, fT, e.flapFV, 0.07, dt);
-        e.flapB = smoothDamp(e.flapB, bT, e.flapBV, 0.07, dt);
-        if (e.flapF < 1e-4 && fT === 0) e.flapF = 0;
-        if (e.flapB < 1e-4 && bT === 0) e.flapB = 0;
-        e.model.setFlap(e.flapF, e.flapB);
-        moving = true;
-      }
+      e.slot.rotation.y = e.yaw;
       e.slot.visible = e !== this.hiddenEntry;
     }
     return moving || this.dragging;
-  }
-
-  // ------------------------------------------------------------------ grab and turn
-  /** The selected book, if it is facing out enough to be picked up. */
-  grabbable(e) {
-    const sel = this.entries[this.selected];
-    return e && e === sel && Math.abs(e.yaw) < 0.35 && !this.dragging && e !== this.hiddenEntry ? e : null;
-  }
-
-  grabStart(e, x, y, type, t) {
-    e.handle.begin(x, y, type, t);
-    this.app.invalidate();
-  }
-
-  grabMove(e, x, y, t) {
-    e.handle.move(x, y, t);
-    this.app.invalidate();
-  }
-
-  grabEnd(e, t) {
-    e.handle.end(t, this.app.clock);
-    this.app.invalidate();
   }
 
   // ------------------------------------------------------------------ picking

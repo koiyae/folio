@@ -349,16 +349,10 @@ export class BookModel {
     this.group.name = 'book';
 
     const boardGeo = new THREE.BoxGeometry(d.Wc, d.Hc, d.bt);
-    // the back board hangs on its own hinge at the spine edge, so it can flap open when the book is spun
-    this.backPivot = new THREE.Group();
-    this.backPivot.position.set(d.jb, 0, -d.bt / 2);
-    this.group.add(this.backPivot);
     this.rightBoard = new THREE.Mesh(boardGeo, [mats.cloth, mats.cloth, mats.cloth, mats.cloth, mats.endpaper, mats.back]);
-    this.rightBoard.position.set(d.Wc / 2, 0, 0);
+    this.rightBoard.position.set(d.jb + d.Wc / 2, 0, -d.bt / 2);
     this.rightBoard.castShadow = this.rightBoard.receiveShadow = true;
-    this.backPivot.add(this.rightBoard);
-    this.flapFront = 0;
-    this.flapBack = 0;
+    this.group.add(this.rightBoard);
 
     this.leftPivot = new THREE.Group();
     this.leftPivot.position.set(0, 0, d.tp / 2);
@@ -400,21 +394,11 @@ export class BookModel {
     return Math.max(0, this.d.tp - this.hL);
   }
 
-  /** Boards swung open by inertia (radians, ≥ 0): front lifts off the block, back drops away. */
-  setFlap(front, back) {
-    if (Math.abs(front - this.flapFront) < 1e-5 && Math.abs(back - this.flapBack) < 1e-5) return;
-    this.flapFront = front;
-    this.flapBack = back;
-    this.apply();
-  }
-
   apply() {
-    const angle = this.coverAngle - this.flapFront;
-    this.leftPivot.rotation.y = angle;
-    this.backPivot.rotation.y = this.flapBack;
+    this.leftPivot.rotation.y = this.coverAngle;
     this.rightStack.update(this.hR, this.openness);
     if (this.leftStack) this.leftStack.update(this.hL, this.openness);
-    this.spine.update(angle, this.openness);
+    this.spine.update(this.coverAngle, this.openness);
   }
 
   /** Meshes used for picking on the shelf. */

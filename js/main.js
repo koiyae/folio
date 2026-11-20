@@ -465,11 +465,6 @@ class App {
     });
 
     c.addEventListener('pointerdown', (e) => this.onPointerDown(e));
-    // the cover pills sit on the book: a drag that starts on them still picks the book up
-    document.getElementById('pills').addEventListener('pointerdown', (e) => {
-      const sel = this.shelf.entries[this.shelf.selected];
-      if (!this.reader.isOpen && this.shelf.grabbable(sel)) this.pillPress = { id: e.pointerId, x0: e.clientX, y0: e.clientY, type: e.pointerType, entry: sel };
-    });
     window.addEventListener('pointermove', (e) => this.onPointerMove(e));
     window.addEventListener('pointerup', (e) => this.onPointerUp(e));
     window.addEventListener('pointercancel', (e) => this.onPointerUp(e));
@@ -522,22 +517,7 @@ class App {
       this.reader.pointerDown(e);
       return;
     }
-    const hit = this.shelf.pick(this.ndc(e.clientX, e.clientY));
-    this.shelfPointer = {
-      id: e.pointerId,
-      x0: e.clientX,
-      y0: e.clientY,
-      t0: performance.now(),
-      moved: false,
-      lx: e.clientX,
-      lt: performance.now(),
-      vx: 0,
-      type: e.pointerType,
-      // a drag that starts on the face-out book picks it up and turns it; elsewhere it scrolls the row
-      grab: hit ? this.shelf.grabbable(hit.entry) : null,
-      grabbing: false,
-    };
-    if (this.shelfPointer.grab) this.canvas.style.cursor = 'grabbing';
+    this.shelfPointer = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now(), moved: false, lx: e.clientX, lt: performance.now(), vx: 0, type: e.pointerType };
   }
 
   onPointerMove(e) {
@@ -556,16 +536,6 @@ class App {
       this.reader.pointerMove(e);
       return;
     }
-    const pp = this.pillPress;
-    if (pp && pp.id === e.pointerId && Math.hypot(e.clientX - pp.x0, e.clientY - pp.y0) > 6) {
-      this.pillPress = null;
-      this.suppressPillClick = true;
-      this.shelfPointer = { id: e.pointerId, x0: pp.x0, y0: pp.y0, t0: performance.now(), moved: true, lx: e.clientX, lt: performance.now(), vx: 0, type: pp.type, grab: pp.entry, grabbing: true };
-      this.ui.hidePills();
-      this.hoverPills = false;
-      this.canvas.style.cursor = 'grabbing';
-      this.shelf.grabStart(pp.entry, pp.x0, pp.y0, pp.type, e.timeStamp - 16);
-    }
     const sp = this.shelfPointer;
     if (sp && sp.id === e.pointerId) {
       const dx = e.clientX - sp.x0;
@@ -574,17 +544,6 @@ class App {
       sp.vx = sp.vx * 0.5 + (((e.clientX - sp.lx) / dt) * 1000) * 0.5;
       sp.lx = e.clientX;
       sp.lt = now;
-      if (sp.grab) {
-        if (!sp.grabbing && Math.hypot(dx, e.clientY - sp.y0) > 4) {
-          sp.grabbing = true;
-          sp.moved = true;
-          this.ui.hidePills();
-          this.hoverPills = false;
-          this.shelf.grabStart(sp.grab, sp.x0, sp.y0, sp.type, e.timeStamp - 16);
-        }
-        if (sp.grabbing) this.shelf.grabMove(sp.grab, e.clientX, e.clientY, e.timeStamp);
-        return;
-      }
       if (!sp.moved && Math.abs(dx) > 6) {
         sp.moved = true;
         this.shelf.dragStart();
@@ -597,7 +556,6 @@ class App {
   }
 
   onPointerUp(e) {
-    if (this.pillPress && this.pillPress.id === e.pointerId) this.pillPress = null;
     if (this.lens && this.lens.id === e.pointerId) {
       this.lens = null;
       return;
@@ -609,11 +567,6 @@ class App {
     const sp = this.shelfPointer;
     if (!sp || sp.id !== e.pointerId) return;
     this.shelfPointer = null;
-    if (sp.grabbing) {
-      this.shelf.grabEnd(sp.grab, e.timeStamp);
-      this.canvas.style.cursor = 'grab';
-      return;
-    }
     if (sp.moved) {
       this.shelf.dragEnd(performance.now() - sp.lt > 80 ? 0 : sp.vx);
       return;
@@ -637,10 +590,9 @@ class App {
 
   shelfHover(x, y) {
     const hit = this.shelf.pick(this.ndc(x, y));
-    const grabbable = hit && this.shelf.grabbable(hit.entry);
-    this.canvas.style.cursor = grabbable ? 'grab' : hit ? 'pointer' : 'default';
+    this.canvas.style.cursor = hit ? 'pointer' : 'default';
     const sel = this.shelf.entries[this.shelf.selected];
-    const over = hit && hit.entry === sel && Math.abs(sel.yaw) < 0.2 && sel.handle.angle < 0.3;
+    const over = hit && hit.entry === sel && Math.abs(sel.yaw) < 0.2;
     if (over && !this.hoverPills) this.showPillsFor(sel);
     else if (!over && this.hoverPills) {
       this.ui.hidePills();
@@ -649,12 +601,6 @@ class App {
   }
 
   showPillsFor(entry) {
-    if (entry.handle.angle > 0.3) {
-      // turned round by hand: the cover is not where the pills would go
-      this.ui.hidePills();
-      this.hoverPills = false;
-      return;
-    }
     const r = this.shelf.coverRect(entry);
     if (!r) return;
     this.ui.showPills((r.left + r.right) / 2, (r.top + r.bottom) / 2);

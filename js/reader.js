@@ -5,7 +5,6 @@ import * as THREE from 'three';
 import { BookModel } from './book3d.js';
 import { Leaf, makePageMaterial, surfaceTable } from './leaf.js';
 import { InkLayer } from './ink.js';
-import { RotationHandle } from './handle.js';
 import { openPdf, renderPageToCanvas, renderQueue, readOutline } from './pdfdoc.js';
 import { canvasTexture, makeEndpaperTexture, makePaperCanvas } from './textures.js';
 import { SHELF_Z } from './shelf.js';
@@ -71,9 +70,6 @@ export class Reader {
     this.parallax = { x: 0, y: 0, tx: 0, ty: 0, vx: { v: 0 }, vy: { v: 0 } };
     this.raycaster = new THREE.Raycaster();
     this.lastTap = { t: 0, x: 0, y: 0 };
-    // grab-and-turn while reading: settles back to the reading pose unless "hand" mode holds it
-    this.handle = new RotationHandle({ settle: 'all', delayMouse: 1.1, delayTouch: 0.7, settleTime: 0.8 });
-    this.handMode = false;
     this.poses = { a: pose(), b: pose(), c: pose(), out: pose(), from: pose() };
   }
 
@@ -97,9 +93,6 @@ export class Reader {
     this.flights = [];
     this.fan = null;
     this.zoom = this.zoomTarget = 1;
-    this.handMode = false;
-    this.handle.settleMode = 'all';
-    this.handle.home(0, true);
     this.pan.set(0, 0);
     this.panTarget.set(0, 0);
     this.tool = null;
@@ -124,16 +117,7 @@ export class Reader {
     this.blankPaper = canvasTexture(makePaperCanvas(d.Wp / d.Hp, 0.3, false), { aniso: 1 });
     this.fanPaper = [0.11, 0.52, 0.83].map((s) => canvasTexture(makePaperCanvas(d.Wp / d.Hp, s, true), { aniso: 4 }));
 
-    // start exactly where the shelf book is (it may have been turned by hand), then square it up on the shelf
-    this.shelfPose(this.poses.start = pose());
-    // a book turned right round needs a moment to come face-out before the cover opens
-    const turned = entry.handle.angle;
-    entry.handle.home(app.clock, true);
-    this.openLead = Math.min(0.6, turned * 0.22);
-    this.tl = -this.openLead;
-    this.poses.out.pos.copy(this.poses.start.pos);
-    this.poses.out.quat.copy(this.poses.start.quat);
-    this.poses.out.scale = this.poses.start.scale;
+    this.shelfPose(this.poses.out);
     this.applyPose(this.poses.out);
     this.root.visible = true;
     app.shelf.hiddenEntry = entry;
@@ -229,8 +213,6 @@ export class Reader {
     this.doc = null;
     this.ink.dispose();
     this.root.visible = false;
-    this.handMode = false;
-    this.handle.home(0, true);
     app.shelf.hiddenEntry = null;
     app.shelf.openGap = 0;
     this.active = false;
@@ -245,7 +227,7 @@ export class Reader {
   shelfPose(out) {
     const slot = this.entry.slot;
     out.pos.copy(slot.position);
-    out.quat.copy(slot.quaternion);
+    out.quat.setFromEuler(_e.set(0, slot.rotation.y, 0));
     out.scale = slot.scale.x;
     return out;
   }
@@ -299,7 +281,6 @@ export class Reader {
     const pitch = lerp(READ_PITCH, -5 * DEG, smoothstep(1.02, 1.7, z)) + this.parallax.y * 5 * DEG;
     const yaw = this.parallax.x * 3 * DEG;
     out.quat.setFromEuler(_e.set(pitch, yaw, 0, 'YXZ'));
-    out.quat.premultiply(this.handle.q); // turned by hand, about the screen axes
     out.scale = fit.scale;
     // anchor: the gutter, a little above the boards
     _v.set(0, 0, d.tp * 0.25).sub(d.center).multiplyScalar(fit.scale).applyQuaternion(out.quat);
@@ -326,20 +307,15 @@ export class Reader {
     px.x = smoothDamp(px.x, px.tx, px.vx, 0.35, dt);
     px.y = smoothDamp(px.y, px.ty, px.vy, 0.35, dt);
 
-    if (this.handle.update(dt, time)) busy = true;
-
     let angle = 0;
     let openness = 1;
     if (this.phase === 'opening') {
       busy = true;
       const tl = this.tl;
-      P.a.pos.copy(P.start.pos);
-      P.a.quat.copy(P.start.quat);
-      P.a.scale = P.start.scale;
+      this.shelfPose(P.a);
       this.liftPose(P.b);
       this.readPose(P.c);
-      const lead = this.openLead || 0;
-      blendPose(P.out, P.a, P.b, seg(tl, -lead, OPEN.lift + lead, lead > 0 ? easeInOutCubic : easeOutCubic));
+      blendPose(P.out, P.a, P.b, seg(tl, 0, OPEN.lift, easeOutCubic));
       blendPose(P.out, P.out, P.c, seg(tl, OPEN.travelAt, OPEN.travel, easeInOutCubic));
       this.applyPose(P.out);
       const c = seg(tl, OPEN.coverAt, OPEN.cover, easeInOutSine);
@@ -374,8 +350,7 @@ export class Reader {
       // reading
       this.readPose(P.c);
       const r = this.root;
-      // follow the hand directly; ease everything else
-      const k = this.handle.busy ? 1 : 1 - Math.exp(-dt * 10);
+      const k = 1 - Math.exp(-dt * 10);
       r.position.lerp(P.c.pos, k);
       r.quaternion.slerp(P.c.quat, k);
       r.scale.setScalar(lerp(r.scale.x, P.c.scale, k));
@@ -930,7 +905,6 @@ export class Reader {
         this.drawing = null;
       }
       this.releaseDrag(true);
-      if (this.gesture && this.gesture.mode === 'rotate') this.handle.end(e.timeStamp || performance.now(), this.app.clock);
       const [a, b] = [...this.pointers.values()];
       this.gesture = {
         mode: 'pinch',
@@ -962,12 +936,6 @@ export class Reader {
 
     const hit = this.hitPage(e.clientX, e.clientY);
     const zoomed = this.zoomTarget > 1.05;
-    if (this.handMode) {
-      // hand mode: every one-finger drag turns the book
-      this.gesture = { mode: 'pending', hit, zoomed, hand: true };
-      this.app.canvas.style.cursor = 'grabbing';
-      return;
-    }
     if (hit && hit.uvx > 0.78 && !zoomed && !this.fan) {
       // grabbed near the fore-edge: lift the leaf right away
       const dir = hit.front ? +1 : -1;
@@ -1027,22 +995,7 @@ export class Reader {
     }
     const dx = e.clientX - p.x0;
     const dy = e.clientY - p.y0;
-    if (g.mode === 'rotate') {
-      this.handle.move(e.clientX, e.clientY, now);
-      this.app.invalidate();
-      return;
-    }
     if (g.mode === 'pending' && Math.hypot(dx, dy) > 8) {
-      if (g.hand || (!g.hit && !g.zoomed)) {
-        // grabbed the book off its pages (boards, edges, or around it): turn it like an object
-        g.mode = 'rotate';
-        this.hover.target = 0;
-        this.handle.begin(p.x0, p.y0, p.type, p.t0);
-        this.handle.move(e.clientX, e.clientY, now);
-        this.app.canvas.style.cursor = 'grabbing';
-        this.app.invalidate();
-        return;
-      }
       if (g.zoomed) {
         g.mode = 'pan';
         g.pan0 = this.panTarget.clone();
@@ -1079,13 +1032,6 @@ export class Reader {
     }
     if (g && g.mode === 'pinch') {
       if (this.pointers.size < 2) this.gesture = this.pointers.size ? { mode: 'none' } : null;
-      return;
-    }
-    if (g && g.mode === 'rotate') {
-      this.handle.end(e.timeStamp || performance.now(), this.app.clock);
-      this.app.canvas.style.cursor = this.handMode ? 'grab' : 'default';
-      this.gesture = null;
-      this.app.invalidate();
       return;
     }
     if (g && g.mode === 'turn') {
@@ -1139,7 +1085,7 @@ export class Reader {
     this.parallax.tx = clamp((x / W) * 2 - 1, -1, 1);
     this.parallax.ty = clamp((y / H) * 2 - 1, -1, 1);
     const h = this.hover;
-    if (this.tool || this.handMode || this.handle.busy || this.flights.length || this.fan || this.zoomTarget > 1.05) {
+    if (this.tool || this.flights.length || this.fan || this.zoomTarget > 1.05) {
       h.target = 0;
     } else {
       const hit = this.hitPage(x, y);
@@ -1149,11 +1095,7 @@ export class Reader {
         h.angle = clamp((hit.uvy - 0.5) * 1.1, -0.5, 0.5);
       } else h.target = 0;
     }
-    let cursor = 'default';
-    if (this.tool) cursor = 'crosshair';
-    else if (this.handMode || h.target > 0) cursor = 'grab';
-    else if (!this.hitPage(x, y)) cursor = 'grab'; // off the pages, the book can be picked up
-    this.app.canvas.style.cursor = cursor;
+    this.app.canvas.style.cursor = this.tool ? 'crosshair' : h.target > 0 ? 'grab' : 'default';
     this.app.invalidate();
   }
 
@@ -1319,20 +1261,7 @@ export class Reader {
   }
 
   // =============================================================== tools & bar
-  /** Hand mode: drags turn the book and it stays where you leave it. */
-  toggleHand(force) {
-    this.handMode = force ?? !this.handMode;
-    this.handle.settleMode = this.handMode ? 'none' : 'all';
-    if (this.handMode) this.tool = null;
-    else this.handle.home(this.app.clock);
-    this.hover.target = 0;
-    this.app.canvas.style.cursor = this.handMode ? 'grab' : 'default';
-    this.updateBar();
-    this.app.invalidate();
-  }
-
   setTool(tool) {
-    if (this.handMode) this.toggleHand(false);
     this.tool = this.tool === tool ? null : tool;
     this.hover.target = 0;
     this.app.canvas.style.cursor = this.tool ? 'crosshair' : 'default';
@@ -1378,7 +1307,6 @@ export class Reader {
       canPrev: this.s > 0,
       canNext: this.s < this.d.leaves,
       undo: this.ink ? this.ink.undoStack.length > 0 : false,
-      hand: this.handMode,
     });
   }
 
@@ -1433,12 +1361,8 @@ export class Reader {
       case 'b':
         this.toggleBookmark();
         return true;
-      case 'r':
-        this.toggleHand();
-        return true;
       case 'Escape':
-        if (this.handMode || this.handle.angle > 0.01) this.toggleHand(false);
-        else if (this.tool) this.setTool(this.tool);
+        if (this.tool) this.setTool(this.tool);
         else if (this.zoomTarget > 1.05) this.setZoom(1);
         else this.close();
         return true;
