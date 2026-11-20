@@ -213,6 +213,8 @@ export class Reader {
     this.doc = null;
     this.ink.dispose();
     this.root.visible = false;
+    this._zoomedFlag = false;
+    document.body.removeAttribute('data-zoomed');
     app.shelf.hiddenEntry = null;
     app.shelf.openGap = 0;
     this.active = false;
@@ -365,6 +367,11 @@ export class Reader {
     if (Math.abs(this.zoom - z0) > 1e-5 || Math.abs(this.pan.x - this.panTarget.x) > 1e-4 || Math.abs(this.pan.y - this.panTarget.y) > 1e-4) {
       busy = true;
       this.zoomSettleAt = time + 0.3;
+    }
+    const zoomedNow = this.zoomTarget > 1.05;
+    if (zoomedNow !== this._zoomedFlag) {
+      this._zoomedFlag = zoomedNow;
+      document.body.toggleAttribute('data-zoomed', zoomedNow);
     }
     if (this.zoomSettleAt && time > this.zoomSettleAt) {
       this.zoomSettleAt = 0;
@@ -1008,10 +1015,20 @@ export class Reader {
       } else g.mode = 'none';
     }
     if (g.mode === 'pan') {
+      // pan; pulling on past the edge of the book stretches a little and, let go far enough, turns the page
       const wpp = this.worldPerPx(this.zoomTarget);
-      this.panTarget.x = g.pan0.x - dx * wpp;
-      this.panTarget.y = g.pan0.y + dy * wpp;
-      this.clampPan();
+      const b = this.panBounds();
+      let x = g.pan0.x - dx * wpp;
+      const y = g.pan0.y + dy * wpp;
+      g.over = 0;
+      if (x > b.maxX) {
+        g.over = (x - b.maxX) / wpp;
+        x = b.maxX + Math.min(60, g.over * 0.35) * wpp;
+      } else if (x < b.minX) {
+        g.over = (x - b.minX) / wpp;
+        x = b.minX - Math.min(60, -g.over * 0.35) * wpp;
+      }
+      this.panTarget.set(x, clamp(y, b.minY, b.maxY));
       this.app.invalidate();
     }
   }
@@ -1046,6 +1063,15 @@ export class Reader {
       this.gesture = null;
       return;
     }
+    if (g && g.mode === 'pan') {
+      const over = g.over || 0;
+      const flick = Math.abs(p.vx) > 600 && Math.sign(-p.vx) === Math.sign(over);
+      this.clampPan();
+      if (e.type !== 'pointercancel' && (Math.abs(over) > 70 || (Math.abs(over) > 24 && flick))) this.stepPage(over > 0 ? +1 : -1);
+      if (!this.pointers.size) this.gesture = null;
+      this.app.invalidate();
+      return;
+    }
     if (g && g.mode === 'pending' && e.type !== 'pointercancel') {
       const quick = (e.timeStamp || performance.now()) - p.t0 < this.app.tapMs;
       if (quick) this.tap(p.x0, p.y0, p.type);
@@ -1059,8 +1085,17 @@ export class Reader {
     const dbl = now - this.lastTap.t < this.app.tapMs * 0.75 && Math.hypot(x - this.lastTap.x, y - this.lastTap.y) < 40;
     this.lastTap = { t: now, x, y };
     const zone = x / W;
-    const zoomed = this.zoomTarget > 1.05;
-    if (dbl && (type === 'mouse' || (zone > 0.3 && zone < 0.7) || zoomed)) {
+    if (this.zoomTarget > 1.05) {
+      // zoomed in: the outer edges step page by page, a double tap in the middle zooms back out
+      if (zone > 0.85) this.stepPage(+1);
+      else if (zone < 0.15) this.stepPage(-1);
+      else if (dbl) {
+        this.lastTap.t = 0;
+        this.toggleZoomAt(x, y);
+      }
+      return;
+    }
+    if (dbl && (type === 'mouse' || (zone >= 0.35 && zone <= 0.65))) {
       this.lastTap.t = 0;
       this.toggleZoomAt(x, y);
       return;
@@ -1074,9 +1109,9 @@ export class Reader {
       }
       return;
     }
-    const edge = zoomed ? 0.1 : 0.4;
-    if (zone > 1 - edge) this.next();
-    else if (zone < edge) this.prev();
+    // outer thirds turn; the middle is kept for double-tap zoom
+    if (zone > 0.65) this.next();
+    else if (zone < 0.35) this.prev();
   }
 
   mouseHover(x, y) {
@@ -1211,18 +1246,91 @@ export class Reader {
     this.clampPan();
   }
 
-  clampPan() {
+  /** The open book as seen at zoom z, in world units relative to the camera's resting position. */
+  viewGeom(z = this.zoomTarget) {
+    const app = this.app;
     const d = this.d;
-    const s = this.root.scale.x;
-    const z = this.zoomTarget;
-    const limX = (d.Wp + d.ov) * s * Math.max(0, 1 - 0.6 / z) + 0.5;
-    const limY = (d.Hc / 2) * s * Math.max(0, 1 - 0.75 / z) + 0.5;
-    if (z <= 1.02) {
+    const fit = this.readFit();
+    const sc = fit.scale;
+    const pitch = lerp(READ_PITCH, -5 * DEG, smoothstep(1.02, 1.7, z));
+    const dist = app.cameraBase.z - fit.pos.z;
+    const halfH = (Math.tan((app.camera.fov * DEG) / 2) * dist) / z;
+    const halfW = (halfH * app.width) / app.height;
+    const perPx = (2 * halfH) / app.height;
+    return {
+      s: sc,
+      cx: fit.pos.x - app.cameraBase.x, // the gutter
+      cy: fit.pos.y - app.cameraBase.y,
+      halfW,
+      halfH,
+      pageW: d.Wp * sc,
+      pageH: d.Hp * Math.cos(pitch) * sc,
+      bookHalfW: (d.Wp + d.ov) * sc,
+      bookHalfH: (d.Hc / 2) * Math.cos(pitch) * sc,
+      barH: app.ui.readBottom() * perPx, // the reader bar covers the bottom of the screen
+      topH: 64 * perPx, // and the header the top
+    };
+  }
+
+  /** Where the view centre may go: anywhere that keeps the book in view, plus room to lift text clear of the bars. */
+  panBounds(z = this.zoomTarget) {
+    const g = this.viewGeom(z);
+    const m = 0.4 * g.s;
+    const rx = Math.abs(g.bookHalfW + m - g.halfW);
+    const up = Math.abs(g.bookHalfH + m + g.topH - g.halfH);
+    const down = Math.abs(g.bookHalfH + m + g.barH - g.halfH);
+    return { minX: g.cx - rx, maxX: g.cx + rx, minY: g.cy - down, maxY: g.cy + up };
+  }
+
+  clampPan() {
+    if (this.zoomTarget <= 1.02) {
       this.panTarget.set(0, 0);
       return;
     }
-    this.panTarget.x = clamp(this.panTarget.x, -limX, limX);
-    this.panTarget.y = clamp(this.panTarget.y, -limY, limY);
+    const b = this.panBounds();
+    this.panTarget.x = clamp(this.panTarget.x, b.minX, b.maxX);
+    this.panTarget.y = clamp(this.panTarget.y, b.minY, b.maxY);
+  }
+
+  /** Bring one page of the spread into view: its top (reading on) or its bottom (going back). */
+  focusPage(side, align = 'top') {
+    const g = this.viewGeom();
+    const sgn = side === 'right' ? 1 : -1;
+    let x = g.cx + sgn * (g.pageW / 2 + 0.05 * g.s);
+    if (g.pageW + 0.6 * g.s > 2 * g.halfW) {
+      // wider than the screen: start at the page's left edge
+      x = g.cx + (sgn > 0 ? 0 : -g.pageW) + g.halfW - 0.3 * g.s;
+    }
+    let y = g.cy;
+    if (g.pageH + g.barH + g.topH > 2 * g.halfH) {
+      y = align === 'top' ? g.cy + g.pageH / 2 + g.topH + 0.3 * g.s - g.halfH : g.cy - g.pageH / 2 - g.barH - 0.3 * g.s + g.halfH;
+    }
+    this.panTarget.set(x, y);
+    this.clampPan();
+    this.app.invalidate();
+    return true;
+  }
+
+  /**
+   * Forward / back one step. Zoomed in on a single page this goes page by page — across to the other page of
+   * the spread, or over the leaf to the next spread; otherwise it turns the spread.
+   */
+  stepPage(dir) {
+    if (!this.active || this.phase !== 'reading') return false;
+    if (this.zoomTarget <= 1.05) return dir > 0 ? this.next() : this.prev();
+    const g = this.viewGeom();
+    const onePage = 2 * g.halfW < g.pageW * 1.5;
+    if (!onePage) return dir > 0 ? this.next() : this.prev();
+    const onRight = this.panTarget.x > g.cx;
+    const { left, right } = this.spreadPages();
+    if (dir > 0) {
+      if (!onRight && right) return this.focusPage('right', 'top');
+      if (this.next()) return this.focusPage('left', 'top');
+      return false;
+    }
+    if (onRight && left) return this.focusPage('left', 'bottom');
+    if (this.prev()) return this.focusPage('right', 'bottom');
+    return false;
   }
 
   setZoom(z) {
@@ -1248,16 +1356,13 @@ export class Reader {
     const visH = 2 * Math.tan((app.camera.fov * DEG) / 2) * dist;
     const pagePxH = ((d.Hp * s) / visH) * app.height;
     const pagePxW = ((d.Wp * s) / visH) * app.height;
-    const availH = app.height - app.ui.readBottom() - 12;
-    const z = clamp(Math.min((0.96 * availH) / pagePxH, (0.96 * app.width) / pagePxW), 1.15, 4);
+    const availH = app.height - app.ui.readBottom() - 64 - 12; // between the header and the reader bar
+    let z = Math.min((0.96 * availH) / pagePxH, (0.96 * app.width) / pagePxW);
+    // when the whole page is already nearly that big (a tablet held sideways), fit its width and read down it
+    if (z < 1.35) z = (0.96 * app.width) / pagePxW;
+    z = clamp(z, 1.15, 4);
     this.zoomTarget = z;
-    // centre that page (book frame → world offset relative to the book's anchor)
-    const cx = (leftSide ? -1 : 1) * (d.Wp / 2 + 0.1) * s;
-    const yAnchor = this.root.position.y - app.cameraBase.y;
-    const yOffPx = (app.height / 2 - availH / 2 - 6) * 0; // keep centred
-    this.panTarget.set(cx, yAnchor + yOffPx);
-    this.clampPan();
-    app.invalidate();
+    this.focusPage(leftSide ? 'left' : 'right', 'top');
   }
 
   // =============================================================== tools & bar
@@ -1327,11 +1432,11 @@ export class Reader {
       case 'ArrowRight':
       case 'PageDown':
       case ' ':
-        this.next();
+        this.stepPage(+1);
         return true;
       case 'ArrowLeft':
       case 'PageUp':
-        this.prev();
+        this.stepPage(-1);
         return true;
       case 'Home':
         this.goToSpread(0);
