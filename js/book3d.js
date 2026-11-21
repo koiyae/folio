@@ -429,6 +429,11 @@ export function makeBookMaterials(look, tex, shared, d) {
   const back = makeBindingMaterial({ kind, color: cloth.clone(), faceW: d.Wc, faceH: d.Hc, groove: 0.955 });
   const inner = makeBindingMaterial({ kind, color: cloth.clone(), faceW: d.Wc, faceH: d.Hc, wear: false });
   const edges = makeBindingMaterial({ kind, color: cloth.clone().multiplyScalar(0.9), faceW: 3, faceH: d.Hc, wear: false });
+  // the boards' edges are often seen exactly edge-on (the spine-side edge under an open book's gutter): depth
+  // on such a sliver is ill-conditioned and would poke a hairline through the pages — push it back
+  edges.polygonOffset = true;
+  edges.polygonOffsetFactor = 4;
+  edges.polygonOffsetUnits = 4;
   const spine = makeBindingMaterial({ kind, faceW: arc, faceH: d.Hc });
   setBindingArt(spine, tex.spine);
   return { cover, back, cloth: edges, endpaper: inner, spine, paper: shared.paperMat, edge: shared.edgeMat };

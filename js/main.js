@@ -143,8 +143,9 @@ class App {
     const edge = makePageEdgeTexture();
     const grain = makeGrainTexture();
     const paper = makeDeferredPaperTextures();
+    paper.onReady = () => this.invalidate();
     setTimeout(() => paper.fill(), 1500);
-    paper.repeat = new THREE.Vector2(6, 9);
+    paper.repeat = new THREE.Vector2(1.5, 2.25);
     this.shared = {
       grain,
       paper,

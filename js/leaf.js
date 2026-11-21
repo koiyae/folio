@@ -55,17 +55,17 @@ export const clearInk = (() => {
 })();
 
 // The paper's look, shared by every leaf so it can be tuned in one place (and dimmed by the candle).
-const RAKE_BASE = 3.0;
+const RAKE_BASE = 1.0;
 function paperUniforms(paper) {
   if (!paper.u)
     paper.u = {
       paperFibre: { value: paper.fibre },
       paperCockle: { value: paper.cockle },
-      paperRepeat: { value: paper.repeat }, // set per book so the tooth keeps its physical size
+      paperRepeat: { value: paper.repeat }, // set per book so the fibres keep their physical size
       paperTint: { value: new THREE.Color(0xe9e8e4) },
       showThrough: { value: 0.24 }, // how much the far side's print darkens this side at rest
-      toothK: { value: 0.45 }, // slope of the paper's felted surface
-      cockleK: { value: 0.1 }, // slope of the sheet's slow waviness
+      toothK: { value: 0.22 }, // slope of the paper's fibre streaks and cloud
+      cockleK: { value: 0.04 }, // slope of the sheet's slow waviness
       transmit: { value: 0.34 }, // diffuse transmittance of the sheet
       // a soft second light skimming the page from the upper left (in book space), so the paper's relief
       // reads even under the flat key light; only its variation is added, the page does not get brighter
@@ -87,8 +87,9 @@ export function setPaperRoomLight(paper, k) {
  *    hide a little more of it;
  *  - transmission: light reaching the far face comes through the sheet, filtered by both prints and the
  *    formation, so a lifted page glows and shows its back mirrored;
- *  - the surface: a felted tooth (≈0.3–1.5 mm) and a slow cockle as normals, lit by the scene's lights and a
- *    soft skimming light, so the paper is visibly rough wherever light grazes it;
+ *  - the surface: smooth, with faint fibre streaks along the grain (patchy, stronger in places) over a gentle
+ *    cloudiness, from one large map per page so nothing repeats in view, and a slow cockle — it shows where
+ *    the light grazes the page, near the gutter and in a curl;
  *  - formation, fibres and specks in the albedo; ink a little smoother than paper; edges a touch toned;
  *  - a gutter that dives into the spine (wide shade + narrow crease) with warm light bounced off the facing page;
  *  - grain that lives mostly in the shadows.
@@ -171,7 +172,7 @@ ghost = mix(ghost, vec3(dot(ghost, vec3(0.2126, 0.7152, 0.0722))), 0.35); // col
 float ghostK = showThrough * (1.0 + 0.6 * turnLift) * (1.3 - 0.6 * dens);
 vec3 col = pg * mix(vec3(1.0), ghost, ghostK);
 col *= mix(vec3(1.0), ink.rgb, ink.a);
-vec3 paperCol = paperTint * (0.94 + 0.12 * fb.r);
+vec3 paperCol = paperTint * (0.82 + 0.36 * fb.r);
 col *= paperCol;
 float folioLum = dot(pg, vec3(0.2126, 0.7152, 0.0722));
 // the gutter: a wide shade and a narrow crease where the sheet dives into the spine
@@ -195,7 +196,7 @@ diffuseColor.rgb *= col;`,
         '#include <normal_fragment_maps>',
         `vec3 folioN0 = normal;
 {
-  // tooth (the far face is a different part of the sheet) + cockle (the same swell, seen from behind)
+  // fibres (the far face is a different part of the sheet) + cockle (the same swell, seen from behind)
   float asp = paperRepeat.y / paperRepeat.x;
   vec2 tuv = vPageUv * paperRepeat + paperSeed + (gl_FrontFacing ? vec2(0.0) : vec2(0.53, 0.29));
   vec2 tg = texture2D(normalMap, tuv).xy * 2.0 - 1.0;
@@ -249,12 +250,12 @@ diffuseColor.rgb *= col;`,
   vec2 gc = gl_FragCoord.xy;
   vec3 grain = vec3(folioHash(gc), folioHash(gc + 17.31), folioHash(gc + 41.77)) - 0.5;
   float gLum = dot(outgoingLight, vec3(0.2126, 0.7152, 0.0722));
-  outgoingLight += grain * (0.3 + 0.7 * (1.0 - smoothstep(0.3, 1.2, gLum))) * 0.04;
+  outgoingLight += grain * (0.45 + 0.55 * (1.0 - smoothstep(0.3, 1.2, gLum))) * 0.075;
 }
 #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => 'folio-paper-4';
+  mat.customProgramCacheKey = () => 'folio-paper-5';
   return mat;
 }
 

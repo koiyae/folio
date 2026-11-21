@@ -112,8 +112,8 @@ export class Reader {
     this.model.set(Math.PI, 0, 0);
 
     app.shared.paper.fill && app.shared.paper.fill();
-    // the paper's tooth at the same physical size whatever the page shape (≈6 tiles of ≈22 mm across a page)
-    app.shared.paper.repeat.set(6, (6 * d.Hp) / d.Wp);
+    // the paper's fibres at the same physical size whatever the page shape (one ≈9 cm map, 1.5 across a page)
+    app.shared.paper.repeat.set(1.5, (1.5 * d.Hp) / d.Wp);
     this.placeholder = canvasTexture(makePaperCanvas(d.Wp / d.Hp, 0.3, true), { aniso: app.maxAniso });
     this.blankPaper = canvasTexture(makePaperCanvas(d.Wp / d.Hp, 0.3, false), { aniso: 1 });
     this.fanPaper = [0.11, 0.52, 0.83].map((s) => canvasTexture(makePaperCanvas(d.Wp / d.Hp, s, true), { aniso: 4 }));

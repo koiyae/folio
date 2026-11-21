@@ -198,6 +198,12 @@ function perlinTile(px, py, r) {
 
 /** Height field → slope texture (R, G = dh/dx, dh/dy scaled to fill the byte range; B = height). Tiles. */
 function slopeCanvas(h, N, gain) {
+  const g = slopeSteps(h, N, gain);
+  let it = g.next();
+  while (!it.done) it = g.next();
+  return it.value;
+}
+function* slopeSteps(h, N, gain) {
   const c = makeCanvas(N, N);
   const ctx = c.getContext('2d');
   const img = ctx.createImageData(N, N);
@@ -219,63 +225,91 @@ function slopeCanvas(h, N, gain) {
       img.data[i + 1] = clamp(128 + dy * gain * 127, 0, 255);
       img.data[i + 2] = ((at(x, y) - lo) / (hi - lo || 1)) * 255;
       img.data[i + 3] = 255;
+      if (x === N - 1 && (y & 63) === 63) yield;
     }
   ctx.putImageData(img, 0, 0);
   return c;
 }
 
 /**
- * Uncoated book paper, as it looks with light skimming across it. Three tileable maps:
- *   tooth  — the felted surface: pits and ridges ≈ 0.3–1.5 mm, a little drawn out along the grain, plus
- *            the odd raised fibre. Stored as slopes (R, G) and height (B). Tile ≈ 22 mm of paper.
- *   fibre  — R: albedo (formation clouds, fibres, specks, valleys a touch darker); G: formation density,
- *            which also decides how much light and show-through pass. Tile ≈ 44 mm.
- *   cockle — the slow waviness a printed sheet takes on from damp and the press: a few gentle swells per page.
+ * Book paper the way it looks under a reading light: smooth, with only a faint, uneven life in it. Like a
+ * photographed sheet stretched over the page (rather than a small tile of "tooth"), one large tileable map
+ * covers most of a page, so nothing repeats in view:
+ *   normal — slopes (R, G) + height (B) of the surface: fine fibre streaks lying along the grain (vertical),
+ *            stronger in some patches than others, over a gentle cloudiness. Tile ≈ 9 cm of paper.
+ *   fibre  — R: albedo (a percent or two of formation and fibre), G: formation density, which also decides
+ *            how much light and show-through pass. Tile ≈ 18 cm, larger than the page.
+ *   cockle — the slow waviness a printed sheet takes on: a few soft swells per page.
  */
-export function makePaperTextures(size = 512) {
-  const N = size;
+export function makePaperTextures() {
+  const steps = paperTextureSteps();
+  let it = steps.next();
+  while (!it.done) it = steps.next();
+  return it.value;
+}
+
+/** Sample a smooth tileable field on a coarse grid once, then read it back bilinearly (cheap at 1024²). */
+function coarseField(G, fn) {
+  const g = new Float32Array(G * G);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) g[y * G + x] = fn(x / G, y / G);
+  return (u, v) => {
+    const fx = u * G;
+    const fy = v * G;
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    const a = (i, j) => g[(((j % G) + G) % G) * G + (((i % G) + G) % G)];
+    const top = a(x0, y0) + (a(x0 + 1, y0) - a(x0, y0)) * tx;
+    const bot = a(x0, y0 + 1) + (a(x0 + 1, y0 + 1) - a(x0, y0 + 1)) * tx;
+    return top + (bot - top) * ty;
+  };
+}
+
+/** The paper maps, made a slice at a time (a generator: yields between slices, returns the textures). */
+export function* paperTextureSteps() {
   const r = rng(0.2718);
 
-  // ---- tooth
-  const tooth = new Float32Array(N * N);
+  // ---- surface: streaks along the grain, patchy, on soft cloud
+  const N = 1024;
+  const h = new Float32Array(N * N);
   {
-    const oct = [
-      [perlinTile(12, 8, r), 0.55],
-      [perlinTile(24, 16, r), 0.45],
-      [perlinTile(48, 32, r), 0.28],
-      [perlinTile(96, 72, r), 0.13],
-      [perlinTile(192, 160, r), 0.05],
-    ];
-    const pits = perlinTile(20, 20, r);
-    for (let y = 0; y < N; y++)
+    const streakA = perlinTile(320, 72, r); // ≈3 px across × 14 px along: short fine fibres
+    const streakB = perlinTile(160, 40, r);
+    const grain = perlinTile(256, 224, r); // a fine, even mottle between them
+    const pa = perlinTile(5, 4, r);
+    const pb = perlinTile(11, 9, r);
+    const ca = perlinTile(9, 7, r);
+    const cb = perlinTile(19, 15, r);
+    // where the fibres show more, and the cloud under them: smooth, so a coarse grid is plenty
+    const patch = coarseField(128, (u, v) => Math.min(1, Math.max(0, 0.45 + (pa(u, v) * 0.8 + pb(u, v) * 0.4) * 1.1)));
+    const cloud = coarseField(128, (u, v) => ca(u, v) * 0.5 + cb(u, v) * 0.25);
+    yield;
+    for (let y = 0; y < N; y++) {
       for (let x = 0; x < N; x++) {
         const u = x / N;
         const v = y / N;
-        let s = 0;
-        for (const [f, w] of oct) s += f(u, v) * w;
-        // felt: soft rounded bumps with sharper pits between them
-        const p = pits(u, v);
-        s -= Math.max(0, -p - 0.2) * 0.6;
-        tooth[y * N + x] = s;
+        const streak = streakA(u, v) * 0.55 + streakB(u, v) * 0.3 + grain(u, v) * 0.35;
+        h[y * N + x] = streak * (0.35 + 0.65 * patch(u, v)) + cloud(u, v);
       }
-    // raised fibres lying mostly along the grain (vertical)
+      if ((y & 31) === 31) yield;
+    }
+    // a scatter of single fibres, mostly along the grain, raised or sunk a hair
     const fc = makeCanvas(N, N);
     const fctx = fc.getContext('2d', { willReadFrequently: true });
-    fctx.fillStyle = '#000';
+    fctx.fillStyle = 'rgb(128,128,128)';
     fctx.fillRect(0, 0, N, N);
     fctx.lineCap = 'round';
-    for (let i = 0; i < 700; i++) {
-      const ang = Math.PI / 2 + (r() - 0.5) * Math.PI * 0.8;
-      const len = 10 + Math.pow(r(), 1.5) * 40;
-      const w = 1 + r() * 1.6;
-      const a = 0.25 + r() * 0.55;
+    for (let i = 0; i < 1800; i++) {
+      const ang = Math.PI / 2 + (r() - 0.5) * 0.7;
+      const len = 6 + Math.pow(r(), 2) * 30;
       const x = r() * N;
       const y = r() * N;
       const dx = Math.cos(ang) * len * 0.5;
       const dy = Math.sin(ang) * len * 0.5;
-      const bend = (r() - 0.5) * len * 0.5;
-      fctx.strokeStyle = `rgba(255,255,255,${a})`;
-      fctx.lineWidth = w;
+      const bend = (r() - 0.5) * len * 0.25;
+      fctx.strokeStyle = r() < 0.55 ? `rgba(255,255,255,${0.12 + r() * 0.2})` : `rgba(0,0,0,${0.1 + r() * 0.16})`;
+      fctx.lineWidth = 0.8 + r() * 0.9;
       for (const ox of [-N, 0, N])
         for (const oy of [-N, 0, N]) {
           const cx = x + ox;
@@ -287,75 +321,48 @@ export function makePaperTextures(size = 512) {
           fctx.stroke();
         }
     }
+    yield;
     const fd = fctx.getImageData(0, 0, N, N).data;
-    for (let i = 0; i < N * N; i++) tooth[i] += (fd[i * 4] / 255) * 0.2;
+    for (let i = 0; i < N * N; i++) h[i] += ((fd[i * 4] - 128) / 128) * 0.3;
+    yield;
   }
 
   // ---- albedo + formation (its own, larger tile)
-  const fibre = makeCanvas(N, N);
+  const M = 512;
+  const fibre = makeCanvas(M, M);
   {
-    const ctx = fibre.getContext('2d', { willReadFrequently: true });
+    const ctx = fibre.getContext('2d');
     const form = [
-      [perlinTile(6, 5, r), 0.45],
-      [perlinTile(12, 10, r), 0.35],
-      [perlinTile(24, 20, r), 0.25],
-      [perlinTile(48, 40, r), 0.12],
+      [perlinTile(4, 3, r), 0.5],
+      [perlinTile(9, 7, r), 0.32],
+      [perlinTile(20, 16, r), 0.18],
     ];
-    const fine = perlinTile(64, 48, r);
-    const img = ctx.createImageData(N, N);
-    for (let y = 0; y < N; y++)
-      for (let x = 0; x < N; x++) {
-        const u = x / N;
-        const v = y / N;
+    const img = ctx.createImageData(M, M);
+    for (let y = 0; y < M; y++)
+      for (let x = 0; x < M; x++) {
+        const u = x / M;
+        const v = y / M;
         let f = 0;
         for (const [fn, w] of form) f += fn(u, v) * w;
-        const i = (y * N + x) * 4;
-        const dens = clamp(0.5 + f * 0.9, 0, 1);
-        // the tooth tile repeats twice across this one, so its valleys can darken the albedo too
-        const th = tooth[((y * 2) % N) * N + ((x * 2) % N)];
-        const alb = 0.5 + f * 0.16 + fine(u, v) * 0.05 + th * 0.05;
-        img.data[i] = clamp(alb * 255, 0, 255);
-        img.data[i + 1] = dens * 255;
+        // the surface map repeats twice across this one: its streaks tint the albedo a touch
+        const sh = h[((y * 2) % N) * N + ((x * 2) % N)];
+        const i = (y * M + x) * 4;
+        img.data[i] = clamp((0.5 + f * 0.09 + sh * 0.025) * 255, 0, 255);
+        img.data[i + 1] = clamp((0.5 + f * 0.9) * 255, 0, 255);
         img.data[i + 2] = 128;
         img.data[i + 3] = 255;
+        if (x === M - 1 && (y & 63) === 63) yield;
       }
     ctx.putImageData(img, 0, 0);
-    // fibres in the albedo: mostly lighter, a few darker; specks of bark and dust
-    ctx.lineCap = 'round';
-    for (let i = 0; i < 1400; i++) {
-      const ang = Math.PI / 2 + (r() - 0.5) * Math.PI * 0.8;
-      const len = 6 + Math.pow(r(), 1.6) * 34;
-      const light = r() < 0.65;
-      const a = light ? 0.05 + r() * 0.1 : 0.04 + r() * 0.07;
-      ctx.strokeStyle = light ? `rgba(255,255,255,${a})` : `rgba(0,0,0,${a})`;
-      ctx.lineWidth = 0.7 + r() * 1.1;
-      const x = r() * N;
-      const y = r() * N;
-      const dx = Math.cos(ang) * len * 0.5;
-      const dy = Math.sin(ang) * len * 0.5;
-      const bend = (r() - 0.5) * len * 0.4;
-      for (const ox of [-N, 0, N])
-        for (const oy of [-N, 0, N]) {
-          const cx = x + ox;
-          const cy = y + oy;
-          if (cx < -len || cx > N + len || cy < -len || cy > N + len) continue;
-          ctx.beginPath();
-          ctx.moveTo(cx - dx, cy - dy);
-          ctx.quadraticCurveTo(cx - Math.sin(ang) * bend, cy + Math.cos(ang) * bend, cx + dx, cy + dy);
-          ctx.stroke();
-        }
-    }
-    for (let i = 0; i < 46; i++) {
-      const x = r() * N;
-      const y = r() * N;
-      const rad = 0.5 + Math.pow(r(), 2) * 1.6;
-      ctx.fillStyle = `rgba(0,0,0,${0.1 + r() * 0.22})`;
-      for (const ox of [-N, 0, N])
-        for (const oy of [-N, 0, N]) {
-          ctx.beginPath();
-          ctx.ellipse(x + ox, y + oy, rad, rad * (0.6 + r() * 0.6), r() * Math.PI, 0, Math.PI * 2);
-          ctx.fill();
-        }
+    // a few specks
+    for (let i = 0; i < 14; i++) {
+      const x = r() * M;
+      const y = r() * M;
+      const rad = 0.5 + Math.pow(r(), 2) * 1.1;
+      ctx.fillStyle = `rgba(0,0,0,${0.08 + r() * 0.14})`;
+      ctx.beginPath();
+      ctx.ellipse(x, y, rad, rad * (0.6 + r() * 0.6), r() * Math.PI, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
@@ -376,10 +383,12 @@ export function makePaperTextures(size = 512) {
       }
   }
 
-  const toothTex = canvasTexture(slopeCanvas(tooth, N, 10), { srgb: false, repeat: [6, 9] });
+  yield;
+  const surf = yield* slopeSteps(h, N, 3.2);
+  const surfTex = canvasTexture(surf, { srgb: false, repeat: [1, 1] });
   const fibreTex = canvasTexture(fibre, { srgb: false, repeat: [1, 1] });
   const cockleTex = canvasTexture(slopeCanvas(cockle, CN, 28), { srgb: false, repeat: [1, 1] });
-  return { normal: toothTex, fibre: fibreTex, cockle: cockleTex };
+  return { normal: surfTex, fibre: fibreTex, cockle: cockleTex };
 }
 
 /**
@@ -546,8 +555,8 @@ export function makeBindingTextures(kind) {
 }
 
 /**
- * The paper maps as flat stand-ins first (they take ≈0.2 s to make), filled in by `fill()` — called a
- * moment after the shelf is up, or right away when a book opens first.
+ * The paper maps as flat stand-ins first, filled in by `fill()` — started a moment after the shelf is up,
+ * or when a book opens first — a few milliseconds at a time.
  */
 export function makeDeferredPaperTextures() {
   const flat = () => {
@@ -557,16 +566,27 @@ export function makeDeferredPaperTextures() {
     x.fillRect(0, 0, 2, 2);
     return canvasTexture(c, { srgb: false, repeat: [1, 1] });
   };
-  const t = { normal: flat(), fibre: flat(), cockle: flat(), ready: false };
+  const t = { normal: flat(), fibre: flat(), cockle: flat(), ready: false, started: false, onReady: null };
+  // made in slices of a few milliseconds between frames, so neither the shelf nor an opening book stutters
   t.fill = () => {
-    if (t.ready) return;
-    t.ready = true;
-    const real = makePaperTextures();
-    for (const k of ['normal', 'fibre', 'cockle']) {
-      t[k].image = real[k].image;
-      t[k].needsUpdate = true;
-      real[k].dispose();
-    }
+    if (t.started) return;
+    t.started = true;
+    const steps = paperTextureSteps();
+    const slice = () => {
+      const t0 = performance.now();
+      let it;
+      do it = steps.next();
+      while (!it.done && performance.now() - t0 < 8);
+      if (!it.done) return void setTimeout(slice, 0);
+      for (const k of ['normal', 'fibre', 'cockle']) {
+        t[k].image = it.value[k].image;
+        t[k].needsUpdate = true;
+        it.value[k].dispose();
+      }
+      t.ready = true;
+      t.onReady && t.onReady();
+    };
+    slice();
   };
   return t;
 }
