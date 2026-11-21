@@ -76,6 +76,21 @@ export class UI {
     $('rb-bookmark').addEventListener('click', () => r().toggleBookmark());
     $('rb-undo').addEventListener('click', () => r().undo());
     $('rb-mag').addEventListener('click', () => app.toggleMagnifier());
+    $('rb-candle').addEventListener('click', () => this.toggleCandlePop());
+    $('candle-pop').querySelectorAll('[data-min]').forEach((b) =>
+      b.addEventListener('click', () => {
+        app.lightCandle(parseInt(b.dataset.min, 10));
+        this.toggleCandlePop(false);
+      }),
+    );
+    $('candle-pop').querySelector('[data-act="more"]').addEventListener('click', () => {
+      app.candle.addTime(5);
+      this.syncCandle(app.candle);
+    });
+    $('candle-pop').querySelector('[data-act="snuff"]').addEventListener('click', () => {
+      app.candle.snuff('snuffed');
+      this.toggleCandlePop(false);
+    });
     for (const id of ['rb-pink', 'rb-yellow', 'rb-pen', 'rb-eraser']) {
       $(id).addEventListener('click', (e) => r().setTool(e.currentTarget.dataset.tool));
     }
@@ -195,7 +210,10 @@ export class UI {
     this.body.dataset.mode = on ? 'reading' : 'shelf';
     $('open-btn').textContent = on ? 'CLOSE BOOK [-]' : 'OPEN BOOK [+]';
     $('readerbar').hidden = !on;
-    if (!on) this.toggleGoto(false);
+    if (!on) {
+      this.toggleGoto(false);
+      this.toggleCandlePop(false);
+    }
     this.hidePills();
   }
 
@@ -235,6 +253,31 @@ export class UI {
   setMagnifier(on) {
     $('rb-mag').setAttribute('aria-pressed', String(on));
     $('rb-mag').setAttribute('aria-label', on ? 'Turn off magnifier' : 'Turn on magnifier');
+  }
+
+  toggleCandlePop(force) {
+    const el = $('candle-pop');
+    const show = force ?? el.hidden;
+    el.hidden = !show;
+    $('rb-candle').setAttribute('aria-expanded', String(show));
+    if (show) {
+      this.toggleGoto(false);
+      this.syncCandle(this.app.candle);
+    }
+  }
+
+  /** Reader-bar readout and popover state for the candle (called a couple of times a second while it burns). */
+  syncCandle(c) {
+    const burning = c.isBurning;
+    const left = c.remaining;
+    const mm = Math.floor(left / 60);
+    const ss = Math.floor(left % 60);
+    $('rb-candle').setAttribute('aria-pressed', String(burning));
+    $('rb-candle').setAttribute('aria-label', burning ? `Reading candle, ${mm} minutes left` : 'Light a reading candle');
+    $('rb-candle-time').textContent = burning ? `${mm + (ss > 0 ? 1 : 0)}′` : '';
+    $('candle-pop').querySelector('.cp-off').hidden = burning;
+    $('candle-pop').querySelector('.cp-on').hidden = !burning;
+    $('cp-left').textContent = `[ ${mm}:${String(ss).padStart(2, '0')} LEFT ]`;
   }
 
   toggleGoto(force) {

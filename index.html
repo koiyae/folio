@@ -40,6 +40,8 @@
 </header>
 
 <div id="marquee" aria-hidden="true"><div class="track"></div></div>
+<div id="candle-dim" aria-hidden="true"></div>
+<div id="candle-glow" aria-hidden="true"></div>
 
 <div id="pills" hidden>
   <button type="button" class="pill" id="pill-details">+ Book details +</button>
@@ -58,6 +60,7 @@
   <button type="button" class="rb readout" id="rb-pages" aria-label="Go to page"><span id="rb-left">1</span><svg class="mark" id="rb-mark" viewBox="0 0 12 14" aria-hidden="true"><path d="M2 1h8v12L6 9.6 2 13z" fill="none" stroke="currentColor" stroke-width="1"/></svg><span id="rb-right">2</span></button>
   <button type="button" class="rb" id="rb-next" aria-label="Next page"><span aria-hidden="true">[</span><svg viewBox="0 0 12 10" aria-hidden="true"><path d="M1 5h9.5M7 1.2L10.8 5 7 8.8" fill="none" stroke="currentColor" stroke-width="1.1"/></svg><span aria-hidden="true">]</span></button>
   <button type="button" class="rb icon" id="rb-bookmark" aria-label="Bookmark this spread" aria-pressed="false"><svg viewBox="0 0 12 14" aria-hidden="true"><path d="M2 1h8v12L6 9.6 2 13z" fill="none" stroke="currentColor" stroke-width="1.1"/></svg></button>
+  <button type="button" class="rb icon candle" id="rb-candle" aria-label="Light a reading candle" aria-pressed="false" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.2c1.7 2 2 3.4 0 5.1-2-1.7-1.7-3.1 0-5.1z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><path d="M10 7.3v1.6" stroke="currentColor" stroke-width="1.1"/><rect x="6.6" y="9" width="6.8" height="8.4" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg><span class="ct" id="rb-candle-time"></span></button>
   <button type="button" class="rb icon" id="rb-mag" aria-label="Turn on magnifier" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 5.3v5.4M5.3 8h5.4" stroke="currentColor" stroke-width="1.2"/><path d="M12.2 12.2l5.2 5.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>
   <span class="swatches" role="group" aria-label="Highlighter">
     <button type="button" class="rb sw" id="rb-pink" data-tool="pink" aria-label="Pink highlighter" aria-pressed="false"><i style="--ink:#ff5fa8"></i></button><button type="button" class="rb sw" id="rb-yellow" data-tool="yellow" aria-label="Yellow highlighter" aria-pressed="false"><i style="--ink:#f4e400"></i></button>
@@ -73,6 +76,26 @@
     <label class="mono" for="goto-range">GO TO PAGE</label>
     <input type="range" id="goto-range" min="1" max="2" value="1">
     <div class="goto-row"><input type="number" id="goto-num" min="1" inputmode="numeric"><span class="mono dim" id="goto-of">/ 2</span><button type="button" class="mono-btn" id="goto-go">[ GO ]</button></div>
+  </div>
+</div>
+
+<div id="candle-pop" hidden>
+  <div class="cp-off">
+    <span class="mono">[ Reading candle ]</span>
+    <p class="note">Light a candle and read until it burns down. Each page you turn stirs the flame.</p>
+    <div class="cp-times">
+      <button type="button" class="mono-btn" data-min="10">[ 10 MIN ]</button>
+      <button type="button" class="mono-btn" data-min="15">[ 15 ]</button>
+      <button type="button" class="mono-btn" data-min="25">[ 25 ]</button>
+      <button type="button" class="mono-btn" data-min="45">[ 45 ]</button>
+    </div>
+  </div>
+  <div class="cp-on" hidden>
+    <span class="mono" id="cp-left">[ 25:00 LEFT ]</span>
+    <div class="cp-times">
+      <button type="button" class="mono-btn" data-act="more">[ +5 MIN ]</button>
+      <button type="button" class="mono-btn" data-act="snuff">[ PUT IT OUT ]</button>
+    </div>
   </div>
 </div>
 

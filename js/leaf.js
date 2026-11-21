@@ -54,15 +54,35 @@ export const clearInk = (() => {
   return t;
 })();
 
-export function makePageMaterial(grainTex) {
-  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+/**
+ * Paper. Physically based and rough, with what makes a page read as paper rather than card:
+ *  - show-through: the other side's print, mirrored and soft, darkens this side by ≈6 % (book stock is
+ *    ≈90–95 % opaque), rising to ≈13 % while the leaf is in the air;
+ *  - transmission: light reaching the far face comes through the sheet, filtered by both prints, so a lifted
+ *    page glows and shows its back mirrored;
+ *  - fibre and formation in the albedo, the paper's tooth as a normal map, ink a little smoother than paper;
+ *  - a gutter that dives into the spine (wide shade + narrow crease) with warm light bounced off the facing page;
+ *  - grain that lives mostly in the shadows.
+ */
+export function makePageMaterial(paper) {
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.86,
+    metalness: 0,
+    side: THREE.DoubleSide,
+    normalMap: paper.normal,
+    normalScale: new THREE.Vector2(0.16, 0.16),
+  });
   const u = {
     mapFront: { value: blankWhite },
     mapBack: { value: blankWhite },
     inkFront: { value: clearInk },
     inkBack: { value: clearInk },
-    grain: { value: grainTex },
-    paperTint: { value: new THREE.Color(0xe6e5e1) },
+    paperFibre: { value: paper.fibre },
+    paperRepeat: { value: paper.repeat }, // shared: set per book so fibres stay round
+    paperTint: { value: new THREE.Color(0xe9e8e4) },
+    turnLift: { value: 0 }, // sin(π·t): 0 lying on a stack, 1 standing up
+    transmit: { value: 0.34 }, // diffuse transmittance of the sheet
   };
   mat.userData.u = u;
   mat.onBeforeCompile = (shader) => {
@@ -78,31 +98,103 @@ uniform sampler2D mapFront;
 uniform sampler2D mapBack;
 uniform sampler2D inkFront;
 uniform sampler2D inkBack;
-uniform sampler2D grain;
+uniform sampler2D paperFibre;
+uniform vec2 paperRepeat;
 uniform vec3 paperTint;
-varying vec2 vPageUv;`,
+uniform float turnLift;
+uniform float transmit;
+varying vec2 vPageUv;
+// the other side of the sheet, in its own page coordinates
+vec3 folioOther(vec2 uv, float bias) {
+  return gl_FrontFacing ? texture2D(mapBack, uv, bias).rgb : texture2D(mapFront, uv, bias).rgb;
+}
+vec4 folioOtherInk(vec2 uv) {
+  return gl_FrontFacing ? texture2D(inkBack, uv) : texture2D(inkFront, uv);
+}
+float folioHash(vec2 p) {
+  return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}`,
       )
       .replace(
         '#include <map_fragment>',
-        `{
-  bool front = gl_FrontFacing;
-  vec2 puv = front ? vPageUv : vec2(1.0 - vPageUv.x, vPageUv.y);
-  vec3 pg = front ? texture2D(mapFront, puv).rgb : texture2D(mapBack, puv).rgb;
-  vec4 ink = front ? texture2D(inkFront, puv) : texture2D(inkBack, puv);
-  vec3 col = pg * paperTint;
-  col *= mix(vec3(1.0), ink.rgb, ink.a);
-  float g = texture2D(grain, vPageUv * vec2(5.0, 7.0)).r;
-  col *= 0.965 + 0.05 * g;
-  // the gutter: light falls off where the paper dives into the spine
-  float gut = smoothstep(0.0, 0.13, vPageUv.x);
-  col *= mix(0.56, 1.0, gut);
-  // a faint shade along the fore-edge, where the sheet turns away from the light
-  col *= mix(0.9, 1.0, smoothstep(1.0, 0.965, vPageUv.x));
-  diffuseColor.rgb *= col;
+        `vec2 puv = gl_FrontFacing ? vPageUv : vec2(1.0 - vPageUv.x, vPageUv.y);
+vec2 ouv = vec2(1.0 - puv.x, puv.y); // this spot, seen from the other side
+vec3 pg = gl_FrontFacing ? texture2D(mapFront, puv).rgb : texture2D(mapBack, puv).rgb;
+vec4 ink = gl_FrontFacing ? texture2D(inkFront, puv) : texture2D(inkBack, puv);
+// show-through: soft, mirrored, subtractive (ink behind absorbs, it never lightens this side)
+vec3 ghost = (
+    folioOther(ouv, 2.5)
+  + folioOther(ouv + vec2( 0.004,  0.003), 2.5)
+  + folioOther(ouv + vec2(-0.0035, 0.004), 2.5)
+  + folioOther(ouv + vec2( 0.003, -0.004), 2.5)
+  + folioOther(ouv + vec2(-0.004, -0.003), 2.5)) * 0.2;
+vec4 oInk = folioOtherInk(ouv);
+ghost *= mix(vec3(1.0), oInk.rgb, oInk.a);
+float ghostK = 0.06 + 0.07 * turnLift;
+vec3 col = pg * mix(vec3(1.0), ghost, ghostK);
+col *= mix(vec3(1.0), ink.rgb, ink.a);
+float fib = texture2D(paperFibre, vPageUv * paperRepeat).r;
+vec3 paperCol = paperTint * (0.955 + 0.09 * fib);
+col *= paperCol;
+float folioLum = dot(pg, vec3(0.2126, 0.7152, 0.0722));
+// the gutter: a wide shade and a narrow crease where the sheet dives into the spine
+float sc = vPageUv.x;
+float gBand = 1.0 - smoothstep(0.0, 0.14, sc);
+float gCore = 1.0 - smoothstep(0.0, 0.045, sc);
+float gShade = min(0.6, 0.2 * gBand * gBand + 0.36 * gCore * gCore * gCore);
+col *= 1.0 - gShade;
+// a faint shade along the fore-edge, where the sheet turns away from the light
+col *= mix(0.92, 1.0, smoothstep(1.0, 0.965, sc));
+diffuseColor.rgb *= col;`,
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `float roughnessFactor = roughness * mix(0.74, 1.0, smoothstep(0.12, 0.6, folioLum)); // ink is a touch smoother`,
+      )
+      .replace(
+        '#include <lights_fragment_end>',
+        `#include <lights_fragment_end>
+{
+  // light arriving on the far face comes through the sheet
+  vec3 tN = normalize(geometryNormal);
+  vec3 tLight = vec3(0.0);
+  #if NUM_DIR_LIGHTS > 0
+  #pragma unroll_loop_start
+  for ( int i = 0; i < NUM_DIR_LIGHTS; i ++ ) {
+    tLight += directionalLights[ i ].color * max(0.0, -dot(tN, directionalLights[ i ].direction));
+  }
+  #pragma unroll_loop_end
+  #endif
+  #if NUM_POINT_LIGHTS > 0
+  #pragma unroll_loop_start
+  for ( int i = 0; i < NUM_POINT_LIGHTS; i ++ ) {
+    vec3 tlv = pointLights[ i ].position - geometryPosition;
+    float tld = length(tlv);
+    tLight += pointLights[ i ].color * getDistanceAttenuation(tld, pointLights[ i ].distance, pointLights[ i ].decay) * max(0.0, -dot(tN, tlv / tld));
+  }
+  #pragma unroll_loop_end
+  #endif
+  vec3 thru = paperCol * pg * folioOther(ouv, 0.6) * mix(vec3(1.0), oInk.rgb, oInk.a) * (1.0 - gShade);
+  reflectedLight.directDiffuse += tLight * thru * (transmit * RECIPROCAL_PI);
+  // warm light bounced off the facing page into the gutter, more where the sheet curls away from view
+  float curlLift = pow(clamp(1.0 - abs(dot(tN, geometryViewDir)), 0.0, 1.0), 1.5);
+  float gFall = pow(1.0 - smoothstep(0.0, 0.23, sc), 0.85);
+  reflectedLight.indirectDiffuse += (reflectedLight.directDiffuse + reflectedLight.indirectDiffuse) * vec3(1.0, 0.96, 0.92) * gFall * (0.8 + 0.6 * curlLift) * 0.16;
 }`,
+      )
+      .replace(
+        '#include <opaque_fragment>',
+        `{
+  // grain, coloured and mostly in the shadows
+  vec2 gc = gl_FragCoord.xy;
+  vec3 grain = vec3(folioHash(gc), folioHash(gc + 17.31), folioHash(gc + 41.77)) - 0.5;
+  float gLum = dot(outgoingLight, vec3(0.2126, 0.7152, 0.0722));
+  outgoingLight += grain * (0.3 + 0.7 * (1.0 - smoothstep(0.3, 1.2, gLum))) * 0.04;
+}
+#include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => 'folio-page-1';
+  mat.customProgramCacheKey = () => 'folio-paper-2';
   return mat;
 }
 
@@ -171,6 +263,7 @@ export class Leaf {
     const sig = `${this.t.toFixed(5)}|${this.bend.toFixed(4)}|${this.eps}|${c.amount.toFixed(4)}|${c.angle.toFixed(4)}|${c.pivotU}|${c.pivotV}|${env.tabR.h.toFixed(5)}|${env.tabR.o.toFixed(4)}|${env.tabL.h.toFixed(5)}`;
     if (!force && sig === this.sig) return false;
     this.sig = sig;
+    this.material.userData.u.turnLift.value = Math.sin(Math.PI * Math.min(1, Math.max(0, this.t)));
     const { Wp, Hp, tabR, tabL } = env;
     const t = this.t;
     const ds = Wp / NC;

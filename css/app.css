@@ -485,6 +485,65 @@ body[data-mode='reading'] .esc-hint {
   background: linear-gradient(to top right, var(--ink) calc(50% - 0.8px), #e5322d calc(50% - 0.8px), #e5322d calc(50% + 0.8px), var(--ink) calc(50% + 0.8px));
 }
 
+/* ---------------------------------------------------------------- candlelight */
+/* behind the 3D canvas: the room dims and the flame's light pools on the wall */
+#candle-dim,
+#candle-glow {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+}
+#candle-dim {
+  background: radial-gradient(ellipse at 50% 55%, rgba(26, 18, 10, 0.34), rgba(14, 9, 4, 0.5));
+}
+#candle-glow {
+  --gx: 50%;
+  --gy: 50%;
+  background: radial-gradient(circle at var(--gx) var(--gy), rgba(255, 176, 96, 0.95) 0, rgba(255, 150, 70, 0.42) 9vmin, rgba(255, 130, 50, 0.12) 30vmin, rgba(255, 120, 40, 0) 58vmin);
+  mix-blend-mode: soft-light;
+}
+.rb.candle .ct {
+  font-size: 10px;
+  min-width: 0;
+}
+.rb.candle .ct:empty {
+  display: none;
+}
+#candle-pop {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--safe-b) + 88px);
+  transform: translateX(-50%);
+  z-index: 9;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  padding: 14px 16px 10px;
+  width: min(380px, 92vw);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+#candle-pop[hidden],
+#candle-pop [hidden] {
+  display: none;
+}
+#candle-pop .note {
+  font-family: var(--sans);
+  font-size: 13px;
+  letter-spacing: 0;
+  line-height: 1.45;
+  color: var(--muted);
+  margin: 8px 0 6px;
+}
+.cp-times {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.cp-on .cp-times {
+  margin-top: 6px;
+}
+
 /* ---------------------------------------------------------------- go-to popover */
 #goto {
   position: fixed;

@@ -239,6 +239,123 @@ export function makeGrainTexture() {
   return canvasTexture(grainCanvas(), { srgb: false, repeat: [1, 1] });
 }
 
+/**
+ * Book paper, up close: a tileable sheet of "formation" (the cloudy flocking of pulp you see holding a page
+ * to the light) and short fibres laid mostly along the grain, with a few specks. Returned twice:
+ *   fibre  — grey value for the albedo (a few percent of mottling)
+ *   normal — the paper's tooth, for light skimming across a curl
+ */
+export function makePaperTextures(size = 512) {
+  const N = size;
+  const r = rng(0.2718);
+  // tileable value noise
+  const lattice = (cells) => {
+    const g = new Float32Array(cells * cells);
+    for (let i = 0; i < g.length; i++) g[i] = r();
+    return (x, y) => {
+      const fx = x * cells;
+      const fy = y * cells;
+      const x0 = Math.floor(fx);
+      const y0 = Math.floor(fy);
+      const tx = fx - x0;
+      const ty = fy - y0;
+      const sx = tx * tx * (3 - 2 * tx);
+      const sy = ty * ty * (3 - 2 * ty);
+      const at = (i, j) => g[(((j % cells) + cells) % cells) * cells + (((i % cells) + cells) % cells)];
+      const a = at(x0, y0) + (at(x0 + 1, y0) - at(x0, y0)) * sx;
+      const b = at(x0, y0 + 1) + (at(x0 + 1, y0 + 1) - at(x0, y0 + 1)) * sx;
+      return a + (b - a) * sy;
+    };
+  };
+  const octaves = [
+    [lattice(5), 0.5],
+    [lattice(11), 0.27],
+    [lattice(23), 0.15],
+    [lattice(47), 0.08],
+  ];
+  const c = makeCanvas(N, N);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  const img = ctx.createImageData(N, N);
+  for (let y = 0; y < N; y++)
+    for (let x = 0; x < N; x++) {
+      let v = 0;
+      for (const [f, w] of octaves) v += f(x / N, y / N) * w;
+      const g = 128 + (v - 0.5) * 70; // formation: soft clouds
+      const i = (y * N + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = g;
+      img.data[i + 3] = 255;
+    }
+  ctx.putImageData(img, 0, 0);
+
+  // fibres: short, slightly curved, mostly along the grain (vertical), some lighter some darker
+  ctx.lineCap = 'round';
+  const fibre = (x, y, ang, len, w, light, alpha) => {
+    const dx = Math.cos(ang) * len * 0.5;
+    const dy = Math.sin(ang) * len * 0.5;
+    const bend = (r() - 0.5) * len * 0.35;
+    ctx.strokeStyle = light ? `rgba(255,255,255,${alpha})` : `rgba(0,0,0,${alpha})`;
+    ctx.lineWidth = w;
+    for (const ox of [-N, 0, N])
+      for (const oy of [-N, 0, N]) {
+        const cx = x + ox;
+        const cy = y + oy;
+        if (cx < -len || cx > N + len || cy < -len || cy > N + len) continue;
+        ctx.beginPath();
+        ctx.moveTo(cx - dx, cy - dy);
+        ctx.quadraticCurveTo(cx - Math.sin(ang) * bend, cy + Math.cos(ang) * bend, cx + dx, cy + dy);
+        ctx.stroke();
+      }
+  };
+  for (let i = 0; i < 2600; i++) {
+    const ang = Math.PI / 2 + (r() - 0.5) * Math.PI * 0.75;
+    const len = 5 + Math.pow(r(), 1.6) * 30;
+    const light = r() < 0.6;
+    fibre(r() * N, r() * N, ang, len, 0.5 + r() * 1.1, light, light ? 0.06 + r() * 0.12 : 0.04 + r() * 0.08);
+  }
+  // specks
+  for (let i = 0; i < 70; i++) {
+    const dark = r() < 0.6;
+    ctx.fillStyle = dark ? `rgba(40,30,20,${0.12 + r() * 0.2})` : `rgba(255,255,255,${0.2 + r() * 0.2})`;
+    const x = r() * N;
+    const y = r() * N;
+    const rad = 0.4 + r() * 0.9;
+    for (const ox of [-N, 0, N])
+      for (const oy of [-N, 0, N]) {
+        ctx.beginPath();
+        ctx.arc(x + ox, y + oy, rad, 0, Math.PI * 2);
+        ctx.fill();
+      }
+  }
+
+  // height → tangent-space normal (wrapping, so it tiles)
+  const src = ctx.getImageData(0, 0, N, N).data;
+  const h = new Float32Array(N * N);
+  for (let i = 0; i < N * N; i++) h[i] = src[i * 4] / 255;
+  const nc = makeCanvas(N, N);
+  const nctx = nc.getContext('2d');
+  const nimg = nctx.createImageData(N, N);
+  const k = 2.2;
+  for (let y = 0; y < N; y++)
+    for (let x = 0; x < N; x++) {
+      const hl = h[y * N + ((x - 1 + N) % N)];
+      const hr = h[y * N + ((x + 1) % N)];
+      const hu = h[((y - 1 + N) % N) * N + x];
+      const hd = h[((y + 1) % N) * N + x];
+      let nx = (hl - hr) * k;
+      let ny = (hd - hu) * k;
+      const l = Math.hypot(nx, ny, 1);
+      const i = (y * N + x) * 4;
+      nimg.data[i] = (nx / l * 0.5 + 0.5) * 255;
+      nimg.data[i + 1] = (ny / l * 0.5 + 0.5) * 255;
+      nimg.data[i + 2] = (1 / l * 0.5 + 0.5) * 255;
+      nimg.data[i + 3] = 255;
+    }
+  nctx.putImageData(nimg, 0, 0);
+  const fibreTex = canvasTexture(c, { srgb: false, repeat: [1, 1] });
+  const normalTex = canvasTexture(nc, { srgb: false, repeat: [4, 6] });
+  return { fibre: fibreTex, normal: normalTex };
+}
+
 /** Leaf edges seen from the head, tail and fore-edge: fine lines of paper. */
 export function makePageEdgeTexture() {
   const c = makeCanvas(8, 256);

@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { Shelf, SHELF_Z } from './shelf.js';
 import { Reader } from './reader.js';
+import { Candle, CANDLE_DIM } from './candle.js';
 import { UI } from './ui.js';
 import { Magnifier } from './magnifier.js';
 import * as store from './store.js';
@@ -10,13 +11,14 @@ import { importFiles, exportAnnotated } from './library.js';
 import {
   makeWeaveNormalTexture,
   makeGrainTexture,
+  makePaperTextures,
   makePageEdgeTexture,
   makeEndpaperTexture,
   canvasTexture,
   luminance,
   mixHex,
 } from './textures.js';
-import { clamp } from './anim.js';
+import { clamp, lerp } from './anim.js';
 
 const DEG = Math.PI / 180;
 const FOV = 18;
@@ -72,6 +74,10 @@ class App {
     this.ui = new UI(this);
     this.shelf = new Shelf(this);
     this.reader = new Reader(this);
+    this.candle = new Candle(this);
+    this.candle.onDone = (info) => this.onSittingDone(info);
+    this.glowEl = document.getElementById('candle-glow');
+    this.dimEl = document.getElementById('candle-dim');
     this.magnifier = new Magnifier();
     this.shelf.onSelect = (e) => this.onSelect(e);
     this.ui.setTheme(this.theme, null);
@@ -105,7 +111,7 @@ class App {
     this.camera = new THREE.PerspectiveCamera(FOV, 1, 1, 1200);
     this.cameraBase = new THREE.Vector3(0, 0, 54);
 
-    this.ambient = new THREE.AmbientLight(0xffffff, 1.15);
+    this.ambient = new THREE.AmbientLight(0xf1f3f9, 1.15); // a touch cool, like daylight from the room
     scene.add(this.ambient);
     const key = new THREE.DirectionalLight(0xfffaf4, 2.1);
     key.castShadow = true;
@@ -120,6 +126,9 @@ class App {
     scene.add(key);
     scene.add(key.target);
     const fill = new THREE.DirectionalLight(0xe9eefc, 0.55);
+    this.fill = fill;
+    // the room's own light levels; a burning candle dims them
+    this.lightBase = { ambient: 1.15, key: 2.1, fill: 0.55 };
     fill.position.set(40, 8, 30);
     scene.add(fill);
 
@@ -141,6 +150,8 @@ class App {
     weaveSpine.needsUpdate = true;
     const edge = makePageEdgeTexture();
     const grain = makeGrainTexture();
+    const paper = makePaperTextures();
+    paper.repeat = new THREE.Vector2(4, 6);
     const blank = document.createElement('canvas');
     blank.width = blank.height = 4;
     const bctx = blank.getContext('2d');
@@ -151,6 +162,7 @@ class App {
       weaveCover,
       weaveSpine,
       grain,
+      paper,
       edgeMat: new THREE.MeshLambertMaterial({ map: edge, color: 0xffffff }),
       paperMat: new THREE.MeshLambertMaterial({ color: 0xedece7 }),
       blankCover: canvasTexture(blank),
@@ -287,7 +299,7 @@ class App {
     const e = this.shelf.entries[this.shelf.selected];
     this.ui.setTheme(this.theme, this.reader.isOpen ? this.reader.entry.look : e && e.look);
     this.shadowMat.opacity = this.theme === 'light' ? 0.3 : this.theme === 'dark' ? 0.7 : 0.5;
-    this.ambient.intensity = this.theme === 'dark' ? 1.0 : 1.15;
+    this.lightBase.ambient = this.theme === 'dark' ? 1.0 : 1.15;
     this.invalidate();
   }
 
@@ -626,6 +638,10 @@ class App {
       this.ui.toggleGoto(false);
       return;
     }
+    if (e.key === 'Escape' && !document.getElementById('candle-pop').hidden) {
+      this.ui.toggleCandlePop(false);
+      return;
+    }
     if (e.key === 'Escape' && this.ui.panelMode) {
       this.ui.closePanel();
       return;
@@ -633,6 +649,11 @@ class App {
     if (this.reader.isOpen) {
       if (e.key === 'm') {
         this.toggleMagnifier();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'c') {
+        this.ui.toggleCandlePop();
         e.preventDefault();
         return;
       }
@@ -668,6 +689,44 @@ class App {
     }
   }
 
+  /** The room dims while the candle burns, and its light pools on the wall behind the book. */
+  applyCandleLight() {
+    const c = this.candle;
+    const dim = c.dim;
+    const b = this.lightBase;
+    this.ambient.intensity = b.ambient * lerp(1, CANDLE_DIM.ambient, dim);
+    this.key.intensity = b.key * lerp(1, CANDLE_DIM.key, dim);
+    this.fill.intensity = b.fill * lerp(1, CANDLE_DIM.fill, dim);
+    this.dimEl.style.opacity = (dim * (this.theme === 'dark' ? 0.25 : 1)).toFixed(3);
+    if (c.group.visible && c.size > 0.01) {
+      const p = c.screenFlame(this.camera, this.width, this.height);
+      const a = clamp(c.size, 0, 1) * c.flick * (this.theme === 'dark' ? 0.5 : 0.42);
+      const st = this.glowEl.style;
+      st.setProperty('--gx', `${p.x.toFixed(1)}px`);
+      st.setProperty('--gy', `${p.y.toFixed(1)}px`);
+      st.opacity = a.toFixed(3);
+    } else this.glowEl.style.opacity = '0';
+  }
+
+  /** Called when the candle goes out — burned down, put out, or the book was closed. */
+  onSittingDone({ reason, minutes }) {
+    const r = this.reader;
+    const pages = r.isOpen && this.sittingStart != null ? Math.max(0, r.s - this.sittingStart) * 2 : this.sittingPages || 0;
+    this.sittingStart = null;
+    const pp = `${pages} page${pages === 1 ? '' : 's'}`;
+    const mins = `${Math.max(1, minutes)} min`;
+    if (reason === 'done') this.ui.toast(`The candle burned down · ${mins} · ${pp}`, 4200);
+    else this.ui.toast(`Candle out · ${mins} · ${pp}`, 3000);
+    this.ui.syncCandle(this.candle);
+  }
+
+  lightCandle(minutes) {
+    if (!this.reader.isOpen) return;
+    this.sittingStart = this.reader.s;
+    this.candle.ignite(minutes);
+    this.ui.syncCandle(this.candle);
+  }
+
   /** Debug/testing: step the simulation by `sec` seconds without waiting for frames. */
   advance(sec, step = 1 / 60) {
     const n = Math.max(1, Math.round(sec / step));
@@ -676,6 +735,8 @@ class App {
       this.clock += dt;
       this.shelf.update(dt);
       this.reader.update(dt, this.clock);
+      this.candle.update(dt, this.camera);
+      this.applyCandleLight();
     }
     this.invalidate();
   }
@@ -693,6 +754,12 @@ class App {
     if (this.shelf.update(dt)) busy = true;
     if (this.reader.update(dt, this.clock)) busy = true;
     if (this.magnifier.enabled && this.magnifier.update(dt)) busy = true;
+    const candleBusy = this.candle.update(dt, this.camera);
+    this.applyCandleLight();
+    if (this.candle.isBurning && t - (this.candleUiT || 0) > 0.5) {
+      this.candleUiT = t;
+      this.ui.syncCandle(this.candle);
+    }
 
     // pending open once the shelf has settled
     if (this.pending && this.pending.id && !this.pending.page && !this.reader.isOpen) {
@@ -730,7 +797,10 @@ class App {
     }
 
     if (busy) this.dirty = Math.max(this.dirty, 2);
+    // a flame alone needs no more than 30 frames a second (kinder to the battery during a long sitting)
+    if (candleBusy && !busy && this.dirty === 0 && t - (this.lastRenderT || 0) >= 1 / 31) this.dirty = 1;
     if (this.dirty > 0) {
+      this.lastRenderT = t;
       this.dirty--;
       if (this.magnifier.enabled && this.reader.isOpen) this.magnifier.render(this.renderer, this.scene, cam);
       else this.renderer.render(this.scene, cam);
