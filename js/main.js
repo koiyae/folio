@@ -5,19 +5,17 @@ import { Shelf, SHELF_Z } from './shelf.js';
 import { Reader } from './reader.js';
 import { Candle, CANDLE_DIM } from './candle.js';
 import { setPaperRoomLight } from './leaf.js';
+import { setBindingRoomLight, setDefaultBinding } from './binding.js';
+import { restyleBookMaterials } from './book3d.js';
 import { UI } from './ui.js';
 import { Magnifier } from './magnifier.js';
 import * as store from './store.js';
 import { importFiles, exportAnnotated } from './library.js';
 import {
-  makeWeaveNormalTexture,
   makeGrainTexture,
-  makePaperTextures,
+  makeDeferredPaperTextures,
   makePageEdgeTexture,
-  makeEndpaperTexture,
-  canvasTexture,
   luminance,
-  mixHex,
 } from './textures.js';
 import { clamp, lerp } from './anim.js';
 
@@ -142,32 +140,16 @@ class App {
     this.wall = wall;
 
     // shared textures / materials
-    const weave = makeWeaveNormalTexture();
-    const weaveCover = weave.clone();
-    weaveCover.repeat.set(18, 26);
-    weaveCover.needsUpdate = true;
-    const weaveSpine = weave.clone();
-    weaveSpine.repeat.set(4, 26);
-    weaveSpine.needsUpdate = true;
     const edge = makePageEdgeTexture();
     const grain = makeGrainTexture();
-    const paper = makePaperTextures();
+    const paper = makeDeferredPaperTextures();
+    setTimeout(() => paper.fill(), 1500);
     paper.repeat = new THREE.Vector2(6, 9);
-    const blank = document.createElement('canvas');
-    blank.width = blank.height = 4;
-    const bctx = blank.getContext('2d');
-    bctx.fillStyle = '#cfcac0';
-    bctx.fillRect(0, 0, 4, 4);
     this.shared = {
-      weave,
-      weaveCover,
-      weaveSpine,
       grain,
       paper,
       edgeMat: new THREE.MeshLambertMaterial({ map: edge, color: 0xffffff }),
       paperMat: new THREE.MeshLambertMaterial({ color: 0xedece7 }),
-      blankCover: canvasTexture(blank),
-      endpaper: makeEndpaperTexture({ cloth: '#8b8580', endTint: '#d9d6ce', endInk: '#8d877e' }),
     };
     // stack edges should never z-fight with the leaves resting on them
     this.shared.paperMat.polygonOffset = true;
@@ -379,14 +361,29 @@ class App {
       look.ink = dark ? '#efebe2' : '#1f1d1a';
       if (dark && luminance(look.accent) < 0.3) look.accent = '#d9ab5f';
       if (!dark && luminance(look.accent) > 0.4) look.accent = '#1d1b19';
-      look.endTint = mixHex('#d9d6ce', look.cloth, 0.12);
-      look.endInk = mixHex('#8d877e', look.cloth, 0.25);
     }
     meta.look = look;
     const e = this.shelf.entries.find((x) => x.meta.id === meta.id);
     if (e) e.look = look;
     this.updateMeta(meta, { retexture: true });
     if (this.theme === 'color') this.ui.setTheme('color', look);
+  }
+
+  /** Bind every book in cloth or leather, and new books too. */
+  async setMaterialAll(kind) {
+    setDefaultBinding(kind);
+    for (const meta of this.metas) {
+      if ((meta.look.material || 'cloth') === kind) continue;
+      meta.look = { ...meta.look, material: kind };
+      const e = this.shelf.entries.find((x) => x.meta.id === meta.id);
+      if (e) {
+        e.meta = meta;
+        e.look = meta.look;
+        restyleBookMaterials(e.mats, meta.look);
+      }
+      await store.putBook(meta);
+    }
+    this.invalidate();
   }
 
   async removeBook(meta) {
@@ -704,6 +701,7 @@ class App {
     this.key.intensity = b.key * lerp(1, CANDLE_DIM.key, dim);
     this.fill.intensity = b.fill * lerp(1, CANDLE_DIM.fill, dim);
     setPaperRoomLight(this.shared.paper, lerp(1, CANDLE_DIM.key, dim));
+    setBindingRoomLight(lerp(1, CANDLE_DIM.ambient, dim));
     this.dimEl.style.opacity = (dim * (this.theme === 'dark' ? 0.25 : 1)).toFixed(3);
     if (c.group.visible && c.size > 0.01) {
       const p = c.screenFlame(this.camera, this.width, this.height);

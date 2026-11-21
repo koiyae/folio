@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import { hash01, rng, clamp } from './anim.js';
+import { defaultBinding } from './binding.js';
 
 export const FONTS = {
   serif: '"Instrument Serif", "Iowan Old Style", Georgia, serif',
@@ -104,8 +105,7 @@ export function chooseLook(id, title, analysis) {
     spineStyle: styles[Math.floor(r() * styles.length)],
     motif: motifs[Math.floor(r() * motifs.length)],
     coverMode: analysis && analysis.designed ? 'image' : 'cloth',
-    endTint: mixHex('#d9d6ce', cloth, 0.12),
-    endInk: mixHex('#8d877e', cloth, 0.25),
+    material: defaultBinding(),
   };
 }
 
@@ -154,85 +154,6 @@ function grainCanvas() {
   ctx.putImageData(img, 0, 0);
   grainCanvasCache = c;
   return c;
-}
-
-/** Overlay a fine woven texture onto a canvas (adds the cloth feel to flat colour). */
-function clothOverlay(ctx, w, h, strength = 0.07) {
-  const pat = ctx.createPattern(weaveColorCanvas(), 'repeat');
-  ctx.save();
-  ctx.globalAlpha = strength;
-  ctx.globalCompositeOperation = 'multiply';
-  ctx.fillStyle = pat;
-  ctx.fillRect(0, 0, w, h);
-  ctx.restore();
-}
-
-let weaveColorCache = null;
-function weaveColorCanvas() {
-  if (weaveColorCache) return weaveColorCache;
-  const N = 64;
-  const P = 4;
-  const c = makeCanvas(N, N);
-  const ctx = c.getContext('2d');
-  const img = ctx.createImageData(N, N);
-  const r = rng(0.1337);
-  for (let y = 0; y < N; y++) {
-    for (let x = 0; x < N; x++) {
-      const cell = (Math.floor(x / P) + Math.floor(y / P)) % 2;
-      const fx = (x % P) / P;
-      const fy = (y % P) / P;
-      const bump = cell ? Math.sin(Math.PI * fy) : Math.sin(Math.PI * fx);
-      const v = 150 + bump * 90 + r() * 15;
-      const i = (y * N + x) * 4;
-      img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
-      img.data[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  weaveColorCache = c;
-  return c;
-}
-
-/** Tangent-space normal map of a plain weave. */
-export function makeWeaveNormalTexture() {
-  const N = 128;
-  const P = 4;
-  const c = makeCanvas(N, N);
-  const ctx = c.getContext('2d');
-  const hgt = new Float32Array(N * N);
-  const r = rng(0.777);
-  for (let y = 0; y < N; y++) {
-    for (let x = 0; x < N; x++) {
-      const cell = (Math.floor(x / P) + Math.floor(y / P)) % 2;
-      const fx = (x % P) / P;
-      const fy = (y % P) / P;
-      hgt[y * N + x] = (cell ? Math.sin(Math.PI * fy) : Math.sin(Math.PI * fx)) * 0.8 + r() * 0.2;
-    }
-  }
-  const img = ctx.createImageData(N, N);
-  for (let y = 0; y < N; y++) {
-    for (let x = 0; x < N; x++) {
-      const hL = hgt[y * N + ((x - 1 + N) % N)];
-      const hR = hgt[y * N + ((x + 1) % N)];
-      const hU = hgt[((y - 1 + N) % N) * N + x];
-      const hD = hgt[((y + 1) % N) * N + x];
-      let nx = (hL - hR) * 1.2;
-      let ny = (hD - hU) * 1.2;
-      let nz = 1;
-      const len = Math.hypot(nx, ny, nz);
-      nx /= len;
-      ny /= len;
-      nz /= len;
-      const i = (y * N + x) * 4;
-      img.data[i] = (nx * 0.5 + 0.5) * 255;
-      img.data[i + 1] = (ny * 0.5 + 0.5) * 255;
-      img.data[i + 2] = (nz * 0.5 + 0.5) * 255;
-      img.data[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  const t = canvasTexture(c, { srgb: false, repeat: [1, 1] });
-  return t;
 }
 
 export function makeGrainTexture() {
@@ -461,6 +382,195 @@ export function makePaperTextures(size = 512) {
   return { normal: toothTex, fibre: fibreTex, cockle: cockleTex };
 }
 
+/**
+ * Binding surfaces, tileable, as two maps:
+ *   slope  — R, G: the surface's slopes (as for the paper), B: height
+ *   detail — R: albedo (0.5 = the binding's own colour), G: roughness offset (0.5 = none), B: height
+ * `tile` is the size of one tile in book units (≈ cm).
+ *
+ * cloth   — book cloth: a plain weave of ≈10 threads/cm, threads a little uneven with slubs, the gaps
+ *           filled with the starch coating, warp and weft each passing over and under.
+ * leather — pebble-grained leather (or a leather-grain buckram): rounded pebbles ≈1.2 mm with creases
+ *           between them, a few long wrinkles, the tops a touch glossier and paler.
+ */
+export function makeBindingTextures(kind) {
+  const N = 512;
+  const r = rng(kind === 'leather' ? 0.618 : 0.314);
+  const h = new Float32Array(N * N);
+  const alb = new Float32Array(N * N);
+  const rough = new Float32Array(N * N);
+  let tile;
+  let gain;
+  if (kind === 'leather') {
+    tile = 2.4;
+    gain = 4.2;
+    // jittered grid of pebble centres (wraps)
+    const G = 20;
+    const cs = N / G;
+    const px = new Float32Array(G * G);
+    const py = new Float32Array(G * G);
+    for (let j = 0; j < G; j++)
+      for (let i = 0; i < G; i++) {
+        px[j * G + i] = (i + 0.15 + r() * 0.7) * cs;
+        py[j * G + i] = (j + 0.15 + r() * 0.7) * cs;
+      }
+    const wr1 = perlinTile(3, 4, r);
+    const wr2 = perlinTile(7, 5, r);
+    const mott = perlinTile(6, 6, r);
+    const fine = perlinTile(96, 96, r);
+    for (let y = 0; y < N; y++)
+      for (let x = 0; x < N; x++) {
+        const gi = Math.floor(x / cs);
+        const gj = Math.floor(y / cs);
+        let f1 = 1e9;
+        let f2 = 1e9;
+        for (let dj = -1; dj <= 1; dj++)
+          for (let di = -1; di <= 1; di++) {
+            let ii = gi + di;
+            let jj = gj + dj;
+            let ox = 0;
+            let oy = 0;
+            if (ii < 0) {
+              ii += G;
+              ox = -N;
+            } else if (ii >= G) {
+              ii -= G;
+              ox = N;
+            }
+            if (jj < 0) {
+              jj += G;
+              oy = -N;
+            } else if (jj >= G) {
+              jj -= G;
+              oy = N;
+            }
+            const dx = px[jj * G + ii] + ox - x;
+            const dy = py[jj * G + ii] + oy - y;
+            const d = dx * dx + dy * dy;
+            if (d < f1) {
+              f2 = f1;
+              f1 = d;
+            } else if (d < f2) f2 = d;
+          }
+        // distance to the border between the two nearest pebbles
+        const edge = (Math.sqrt(f2) - Math.sqrt(f1)) / cs;
+        const dome = Math.sqrt(Math.min(1, edge / 0.42));
+        // long soft wrinkles: thin valleys along the zero lines of a low noise
+        const w = Math.abs(wr1(x / N, y / N) * 0.7 + wr2(x / N, y / N) * 0.3);
+        const wrinkle = 1 - Math.min(1, w / 0.022);
+        const k = y * N + x;
+        h[k] = dome * 0.8 - wrinkle * 0.16 + fine(x / N, y / N) * 0.05;
+        const m = mott(x / N, y / N);
+        alb[k] = 0.5 + (dome - 0.6) * 0.18 - wrinkle * 0.04 + m * 0.07;
+        rough[k] = 0.5 - (dome - 0.6) * 0.35 + wrinkle * 0.1;
+      }
+  } else {
+    tile = 3.2;
+    gain = 6;
+    const T = 32; // threads per tile each way
+    const p = N / T;
+    const tw = new Float32Array(T); // thread width (fraction of the pitch)
+    const tt = new Float32Array(T); // thread tone
+    const fw = new Float32Array(T);
+    const ft = new Float32Array(T);
+    for (let i = 0; i < T; i++) {
+      tw[i] = 0.78 + r() * 0.16;
+      tt[i] = (r() - 0.5) * 0.08;
+      fw[i] = 0.76 + r() * 0.18;
+      ft[i] = (r() - 0.5) * 0.08;
+    }
+    const slubW = perlinTile(T, 10, r); // thickening along each warp
+    const slubF = perlinTile(10, T, r);
+    const fuzz = perlinTile(128, 128, r);
+    const mott = perlinTile(5, 5, r);
+    // threads are never quite straight: each wanders a little across its neighbours' lines
+    const wanderX = perlinTile(6, 3, r);
+    const wanderY = perlinTile(3, 6, r);
+    for (let y = 0; y < N; y++)
+      for (let x = 0; x < N; x++) {
+        const xx = x + wanderX(x / N, y / N) * p * 0.45;
+        const yy = y + wanderY(x / N, y / N) * p * 0.45;
+        const i = ((Math.floor(xx / p) % T) + T) % T;
+        const j = ((Math.floor(yy / p) % T) + T) % T;
+        const fx = xx / p - Math.floor(xx / p);
+        const fy = yy / p - Math.floor(yy / p);
+        const sw = 1 + slubW((i + 0.5) / T, y / N) * 0.35;
+        const sf = 1 + slubF(x / N, (j + 0.5) / T) * 0.35;
+        const aw = Math.max(0, 1 - Math.pow((fx - 0.5) / (0.5 * tw[i] * sw), 2));
+        const af = Math.max(0, 1 - Math.pow((fy - 0.5) / (0.5 * fw[j] * sf), 2));
+        // over and under: warp i is on top where (i + j) is even
+        const zw = 0.5 + 0.5 * Math.sin(Math.PI * (yy / p) + Math.PI * i);
+        const zf = 0.5 - 0.5 * Math.sin(Math.PI * (xx / p) + Math.PI * j);
+        const hw = aw > 0 ? Math.sqrt(aw) * 0.55 + zw * 0.45 : 0;
+        const hf = af > 0 ? Math.sqrt(af) * 0.55 + zf * 0.45 : 0;
+        const k = y * N + x;
+        const top = hw >= hf;
+        let v = Math.max(hw, hf);
+        v = Math.max(v, 0.32); // the coating fills the gaps
+        v += fuzz(x / N, y / N) * 0.06;
+        h[k] = v;
+        alb[k] = 0.5 + (top ? tt[i] : ft[j]) + (v - 0.6) * 0.08 + mott(x / N, y / N) * 0.05;
+        rough[k] = 0.5 - (v - 0.6) * 0.2;
+      }
+  }
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < h.length; i++) {
+    if (h[i] < lo) lo = h[i];
+    if (h[i] > hi) hi = h[i];
+  }
+  // centre albedo and roughness on 0.5 so the binding keeps its chosen colour and finish on average
+  let ma = 0;
+  let mr = 0;
+  for (let k = 0; k < N * N; k++) {
+    ma += alb[k];
+    mr += rough[k];
+  }
+  ma = ma / (N * N) - 0.5;
+  mr = mr / (N * N) - 0.5;
+  const dc = makeCanvas(N, N);
+  const dctx = dc.getContext('2d');
+  const img = dctx.createImageData(N, N);
+  for (let k = 0; k < N * N; k++) {
+    img.data[k * 4] = clamp((alb[k] - ma) * 255, 0, 255);
+    img.data[k * 4 + 1] = clamp((rough[k] - mr) * 255, 0, 255);
+    img.data[k * 4 + 2] = ((h[k] - lo) / (hi - lo || 1)) * 255;
+    img.data[k * 4 + 3] = 255;
+  }
+  dctx.putImageData(img, 0, 0);
+  return {
+    slope: canvasTexture(slopeCanvas(h, N, gain), { srgb: false, repeat: [1, 1] }),
+    detail: canvasTexture(dc, { srgb: false, repeat: [1, 1] }),
+    tile,
+  };
+}
+
+/**
+ * The paper maps as flat stand-ins first (they take ≈0.2 s to make), filled in by `fill()` — called a
+ * moment after the shelf is up, or right away when a book opens first.
+ */
+export function makeDeferredPaperTextures() {
+  const flat = () => {
+    const c = makeCanvas(2, 2);
+    const x = c.getContext('2d');
+    x.fillStyle = 'rgb(128,128,128)';
+    x.fillRect(0, 0, 2, 2);
+    return canvasTexture(c, { srgb: false, repeat: [1, 1] });
+  };
+  const t = { normal: flat(), fibre: flat(), cockle: flat(), ready: false };
+  t.fill = () => {
+    if (t.ready) return;
+    t.ready = true;
+    const real = makePaperTextures();
+    for (const k of ['normal', 'fibre', 'cockle']) {
+      t[k].image = real[k].image;
+      t[k].needsUpdate = true;
+      real[k].dispose();
+    }
+  };
+  return t;
+}
+
 /** Leaf edges seen from the head, tail and fore-edge: fine lines of paper. */
 export function makePageEdgeTexture() {
   const c = makeCanvas(8, 256);
@@ -509,42 +619,6 @@ export function makePaperCanvas(aspect = 0.7, seed = 0.5, lines = true) {
 }
 
 // ---------------------------------------------------------------- endpaper
-export function makeEndpaperTexture(look) {
-  const N = 512;
-  const cell = 64;
-  const c = makeCanvas(N, N);
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = look.endTint || '#d9d6ce';
-  ctx.fillRect(0, 0, N, N);
-  const r = rng(hash01(look.cloth, 3));
-  ctx.strokeStyle = look.endInk || '#8d877e';
-  ctx.lineCap = 'butt';
-  const radii = [cell * 0.18, cell * 0.5, cell * 0.82];
-  for (let gy = 0; gy < N / cell; gy++) {
-    for (let gx = 0; gx < N / cell; gx++) {
-      const x = gx * cell;
-      const y = gy * cell;
-      const flip = r() < 0.5;
-      ctx.lineWidth = 3.2;
-      for (const rad of radii) {
-        ctx.beginPath();
-        if (flip) {
-          ctx.arc(x, y, rad, 0, Math.PI / 2);
-          ctx.moveTo(x + cell - rad, y + cell);
-          ctx.arc(x + cell, y + cell, rad, Math.PI, Math.PI * 1.5);
-        } else {
-          ctx.arc(x + cell, y, rad, Math.PI / 2, Math.PI);
-          ctx.moveTo(x + rad, y + cell);
-          ctx.arc(x, y + cell, rad, 0, -Math.PI / 2, true);
-        }
-        ctx.stroke();
-      }
-    }
-  }
-  clothOverlay(ctx, N, N, 0.05);
-  return canvasTexture(c, { repeat: [1, 1] });
-}
-
 // ---------------------------------------------------------------- text helpers
 function drawSpaced(ctx, text, x, y, spacing) {
   if (!spacing) {
@@ -612,24 +686,17 @@ function drawMark(ctx, cx, cy, size, color) {
 }
 
 // ---------------------------------------------------------------- spine
-export function makeSpineCanvas(meta, look, spineWorldW, spineWorldH) {
+/** Spine lettering. `mask`: draw only what is stamped, white on black (see stampedTexture). */
+export function makeSpineCanvas(meta, look, spineWorldW, spineWorldH, mask = false) {
   const H = 1024;
   const W = Math.max(72, Math.round((H * spineWorldW) / spineWorldH));
   const c = makeCanvas(W, H);
   const ctx = c.getContext('2d');
-  ctx.fillStyle = look.cloth;
+  ctx.fillStyle = mask ? '#000' : look.cloth;
   ctx.fillRect(0, 0, W, H);
-  // gentle highlight down the middle of the rounded spine
-  const g = ctx.createLinearGradient(0, 0, W, 0);
-  g.addColorStop(0, 'rgba(0,0,0,0.10)');
-  g.addColorStop(0.5, 'rgba(255,255,255,0.05)');
-  g.addColorStop(1, 'rgba(0,0,0,0.10)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
-  clothOverlay(ctx, W, H, 0.08);
 
-  const inkCol = look.ink;
-  const titleCol = look.spineStyle === 'serif' && luminance(look.cloth) < 0.3 ? look.accent : inkCol;
+  const inkCol = mask ? '#fff' : look.ink;
+  const titleCol = mask ? '#fff' : look.spineStyle === 'serif' && luminance(look.cloth) < 0.3 ? look.accent : inkCol;
   const markSize = Math.min(W * 0.42, 44);
   const markY = H - markSize * 1.6;
   drawMark(ctx, W / 2, markY, markSize, titleCol);
@@ -728,18 +795,6 @@ export function makeSpineCanvas(meta, look, spineWorldW, spineWorldH) {
 }
 
 // ---------------------------------------------------------------- covers
-function hingeGroove(ctx, W, H) {
-  // the crease a few millimetres in from the spine on a case binding
-  const x = W * 0.045;
-  const g = ctx.createLinearGradient(x - W * 0.02, 0, x + W * 0.025, 0);
-  g.addColorStop(0, 'rgba(0,0,0,0)');
-  g.addColorStop(0.45, 'rgba(0,0,0,0.16)');
-  g.addColorStop(0.6, 'rgba(255,255,255,0.08)');
-  g.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W * 0.09, H);
-}
-
 function drawMotif(ctx, look, W, H, seed) {
   const r = rng(seed);
   ctx.save();
@@ -820,18 +875,18 @@ function drawMotif(ctx, look, W, H, seed) {
 }
 
 /** A typeset cloth cover for PDFs whose first page is not a designed cover. */
-export function makeClothCoverCanvas(meta, look, aspect /* W/H of the board */) {
+export function makeClothCoverCanvas(meta, look, aspect /* W/H of the board */, mask = false) {
   const W = 768;
   const H = Math.round(W / aspect);
   const c = makeCanvas(W, H);
   const ctx = c.getContext('2d');
-  ctx.fillStyle = look.cloth;
+  ctx.fillStyle = mask ? '#000' : look.cloth;
   ctx.fillRect(0, 0, W, H);
-  clothOverlay(ctx, W, H, 0.09);
+  if (mask) look = { ...look, accent: '#fff', ink: '#fff' };
   const title = (meta.title || 'Untitled').trim();
   const author = (meta.author || '').trim();
   const m = W * 0.1;
-  const titleCol = luminance(look.cloth) < 0.3 ? look.accent : look.ink;
+  const titleCol = mask ? '#fff' : luminance(look.cloth) < 0.3 ? look.accent : look.ink;
 
   // title block, top-left
   ctx.fillStyle = titleCol;
@@ -867,7 +922,6 @@ export function makeClothCoverCanvas(meta, look, aspect /* W/H of the board */) 
   }
   // corner mark
   drawMark(ctx, W - m * 0.95, m * 0.95, W * 0.07, titleCol);
-  hingeGroove(ctx, W, H);
   return c;
 }
 
@@ -885,7 +939,36 @@ export function makeImageCoverCanvas(image, aspect) {
   ctx.fillStyle = '#ddd';
   ctx.fillRect(0, 0, W, H);
   ctx.drawImage(image, (W - dw) / 2, (H - dh) / 2, dw, dh);
-  clothOverlay(ctx, W, H, 0.05);
-  hingeGroove(ctx, W, H);
   return c;
+}
+
+/**
+ * Colour artwork + its stamp mask in one texture: RGB from `color`, alpha = how much of the spot is
+ * stamped into the binding (0 where the binding shows, 1 inside a letter). No mask → nothing stamped.
+ * Built as raw data so the colour survives where the alpha is 0 (a canvas would premultiply it away).
+ */
+export function stampedTexture(color, mask = null, aniso = 8) {
+  const W = color.width;
+  const H = color.height;
+  const cd = color.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  const md = mask ? mask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data : null;
+  const out = new Uint8Array(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    const src = y * W * 4;
+    const dst = (H - 1 - y) * W * 4; // rows bottom-up, as a flipped canvas texture would be
+    for (let x = 0; x < W * 4; x += 4) {
+      out[dst + x] = cd[src + x];
+      out[dst + x + 1] = cd[src + x + 1];
+      out[dst + x + 2] = cd[src + x + 2];
+      out[dst + x + 3] = md ? md[src + x] : 0;
+    }
+  }
+  const t = new THREE.DataTexture(out, W, H, THREE.RGBAFormat);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.generateMipmaps = true;
+  t.anisotropy = aniso;
+  t.needsUpdate = true;
+  return t;
 }

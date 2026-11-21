@@ -851,10 +851,14 @@ body[data-mode='reading'] .esc-hint {
   outline-offset: 2px;
 }
 .seg {
-  display: inline-flex;
+  display: flex;
+  align-items: baseline;
   gap: 14px;
   margin-top: 12px;
   flex-wrap: wrap;
+}
+.seg > .mono.dim:first-child {
+  min-width: 66px;
 }
 .seg button[aria-pressed='true'] {
   text-decoration: underline;

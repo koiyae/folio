@@ -11,6 +11,7 @@
 
 import * as THREE from 'three';
 import { clamp } from './anim.js';
+import { bindingKind, makeBindingMaterial, setBindingArt, setBindingKind } from './binding.js';
 
 export const SHELF_SCALE = 0.8;
 
@@ -414,30 +415,32 @@ export class BookModel {
 }
 
 // ------------------------------------------------------------------------------------------- materials
-/** Build the per-book material set. `tex` holds the generated textures. */
-export function makeBookMaterials(look, tex, shared) {
+/**
+ * The per-book material set. Boards, spine and the insides of the boards are all the binding (cloth or
+ * leather, see binding.js) in the book's colour; `tex.spine` is the spine's artwork + stamp texture. The
+ * front cover gets its artwork later (shelf.ensureCover) and shows the plain binding until then.
+ */
+export function makeBookMaterials(look, tex, shared, d) {
+  const kind = bindingKind(look);
   const cloth = new THREE.Color(look.cloth);
-  const clothNormal = shared.weave;
-  const cover = new THREE.MeshStandardMaterial({
-    map: tex.cover,
-    normalMap: tex.coverWeave,
-    normalScale: new THREE.Vector2(0.28, 0.28),
-    roughness: 0.78,
-    metalness: 0,
-  });
-  const back = new THREE.MeshStandardMaterial({
-    color: cloth,
-    normalMap: tex.coverWeave || clothNormal,
-    normalScale: new THREE.Vector2(0.3, 0.3),
-    roughness: 0.8,
-  });
-  const clothMat = new THREE.MeshStandardMaterial({ color: cloth.clone().multiplyScalar(0.86), roughness: 0.85 });
-  const endpaper = new THREE.MeshStandardMaterial({ map: tex.endpaper, roughness: 0.92 });
-  const spine = new THREE.MeshStandardMaterial({
-    map: tex.spine,
-    normalMap: tex.spineWeave,
-    normalScale: new THREE.Vector2(0.25, 0.25),
-    roughness: 0.78,
-  });
-  return { cover, back, cloth: clothMat, endpaper, spine, paper: shared.paperMat, edge: shared.edgeMat };
+  const arc = d.T + 0.35;
+  const cover = makeBindingMaterial({ kind, color: cloth.clone(), faceW: d.Wc, faceH: d.Hc, groove: 0.045 });
+  // the back board's outer face runs from the fore-edge (u = 0) to the spine (u = 1)
+  const back = makeBindingMaterial({ kind, color: cloth.clone(), faceW: d.Wc, faceH: d.Hc, groove: 0.955 });
+  const inner = makeBindingMaterial({ kind, color: cloth.clone(), faceW: d.Wc, faceH: d.Hc, wear: false });
+  const edges = makeBindingMaterial({ kind, color: cloth.clone().multiplyScalar(0.9), faceW: 3, faceH: d.Hc, wear: false });
+  const spine = makeBindingMaterial({ kind, faceW: arc, faceH: d.Hc });
+  setBindingArt(spine, tex.spine);
+  return { cover, back, cloth: edges, endpaper: inner, spine, paper: shared.paperMat, edge: shared.edgeMat };
+}
+
+/** Recolour / change the binding of a material set in place. */
+export function restyleBookMaterials(mats, look) {
+  const kind = bindingKind(look);
+  const cloth = new THREE.Color(look.cloth);
+  for (const k of ['cover', 'back', 'endpaper', 'cloth', 'spine']) setBindingKind(mats[k], kind);
+  mats.back.color.copy(cloth);
+  mats.endpaper.color.copy(cloth);
+  mats.cloth.color.copy(cloth).multiplyScalar(0.9);
+  if (!mats.cover.map) mats.cover.color.copy(cloth);
 }

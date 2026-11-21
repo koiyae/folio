@@ -1,13 +1,9 @@
 // The shelf: one row of books, spines to camera, the selected book turned face-out and pulled forward.
 
 import * as THREE from 'three';
-import { BookModel, bookDims, makeBookMaterials, SHELF_SCALE } from './book3d.js';
-import {
-  canvasTexture,
-  makeClothCoverCanvas,
-  makeImageCoverCanvas,
-  makeSpineCanvas,
-} from './textures.js';
+import { BookModel, bookDims, makeBookMaterials, restyleBookMaterials, SHELF_SCALE } from './book3d.js';
+import { setBindingArt } from './binding.js';
+import { makeClothCoverCanvas, makeImageCoverCanvas, makeSpineCanvas, stampedTexture } from './textures.js';
 import { clamp, smoothDamp, smoothstep } from './anim.js';
 import * as store from './store.js';
 
@@ -66,17 +62,8 @@ export class Shelf {
     const d = bookDims(meta.pages, meta.aspect);
     const look = meta.look;
     const arc = d.T + 0.35;
-    const spineCanvas = makeSpineCanvas(meta, look, arc, d.Hc);
-    const tex = {
-      cover: app.shared.blankCover,
-      spine: canvasTexture(spineCanvas, { aniso: app.maxAniso }),
-      endpaper: app.shared.endpaper,
-      coverWeave: app.shared.weaveCover,
-      spineWeave: app.shared.weaveSpine,
-    };
-    const mats = makeBookMaterials(look, tex, app.shared);
-    mats.cover.color = new THREE.Color(look.cloth); // until the real cover texture exists
-    mats.cover.map = null;
+    const tex = { spine: spineTexture(meta, look, arc, d.Hc, app.maxAniso) };
+    const mats = makeBookMaterials(look, tex, app.shared, d); // the cover shows plain binding until its art exists
     const model = new BookModel(d, mats, { withLeftStack: false });
     model.set(Math.PI, 0, 0);
     const slot = new THREE.Group();
@@ -132,7 +119,7 @@ export class Shelf {
   disposeEntry(e) {
     this.group.remove(e.slot);
     e.model.dispose();
-    for (const k of ['cover', 'back', 'cloth', 'spine']) e.mats[k].dispose();
+    for (const k of ['cover', 'back', 'cloth', 'endpaper', 'spine']) e.mats[k].dispose();
     e.tex.spine.dispose();
     if (e.coverTex) e.coverTex.dispose();
   }
@@ -144,14 +131,10 @@ export class Shelf {
     const e = this.entries[i];
     e.meta = meta;
     e.look = meta.look;
-    const spineCanvas = makeSpineCanvas(meta, meta.look, e.d.T + 0.35, e.d.Hc);
     e.tex.spine.dispose();
-    e.tex.spine = canvasTexture(spineCanvas, { aniso: this.app.maxAniso });
-    e.mats.spine.map = e.tex.spine;
-    e.mats.spine.needsUpdate = true;
-    const cloth = new THREE.Color(meta.look.cloth);
-    e.mats.back.color.copy(cloth);
-    e.mats.cloth.color.copy(cloth).multiplyScalar(0.86);
+    e.tex.spine = spineTexture(meta, meta.look, e.d.T + 0.35, e.d.Hc, this.app.maxAniso);
+    setBindingArt(e.mats.spine, e.tex.spine);
+    restyleBookMaterials(e.mats, meta.look);
     this.releaseCover(e);
     this.ensureCover(e);
   }
@@ -160,16 +143,17 @@ export class Shelf {
   ensureCover(e) {
     if (e.coverState !== 'none') return;
     e.coverState = 'loading';
-    const finish = (canvas) => {
+    const finish = (color, mask = null) => {
       if (e.coverState !== 'loading') return;
-      e.coverTex = canvasTexture(canvas, { aniso: this.app.maxAniso });
-      e.mats.cover.map = e.coverTex;
+      e.coverTex = stampedTexture(color, mask, this.app.maxAniso);
+      setBindingArt(e.mats.cover, e.coverTex);
       e.mats.cover.color.set(0xffffff);
-      e.mats.cover.needsUpdate = true;
       e.coverState = 'ready';
       this.app.invalidate();
     };
     const boardAspect = e.d.Wc / e.d.Hc;
+    // a typeset cover is stamped into the binding; a PDF's own cover is printed on it
+    const typeset = () => finish(makeClothCoverCanvas(e.meta, e.look, boardAspect), makeClothCoverCanvas(e.meta, e.look, boardAspect, true));
     if (e.look.coverMode === 'image') {
       store
         .getCover(e.meta.id)
@@ -178,20 +162,17 @@ export class Shelf {
           if (img) {
             finish(makeImageCoverCanvas(img, boardAspect));
             img.close && img.close();
-          } else finish(makeClothCoverCanvas(e.meta, e.look, boardAspect));
+          } else typeset();
         })
-        .catch(() => finish(makeClothCoverCanvas(e.meta, e.look, boardAspect)));
-    } else {
-      finish(makeClothCoverCanvas(e.meta, e.look, boardAspect));
-    }
+        .catch(typeset);
+    } else typeset();
   }
 
   releaseCover(e) {
     if (e.coverTex) e.coverTex.dispose();
     e.coverTex = null;
-    e.mats.cover.map = null;
+    setBindingArt(e.mats.cover, null);
     e.mats.cover.color.set(e.look.cloth);
-    e.mats.cover.needsUpdate = true;
     e.coverState = 'none';
   }
 
@@ -356,4 +337,9 @@ export class Shelf {
   entryIndex(e) {
     return this.entries.indexOf(e);
   }
+}
+
+/** The spine's lettering, stamped into the binding. */
+function spineTexture(meta, look, arc, Hc, aniso) {
+  return stampedTexture(makeSpineCanvas(meta, look, arc, Hc), makeSpineCanvas(meta, look, arc, Hc, true), aniso);
 }

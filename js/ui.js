@@ -3,6 +3,7 @@
 import { CLOTHS, themePalette } from './textures.js';
 import { clamp } from './anim.js';
 import * as store from './store.js';
+import { BINDINGS, bindingKind } from './binding.js';
 import { inkSettings, PEN_COLORS, MARKER_COLORS, RANGES, TOOL_KIND, makeStroke, drawStroke, pressureFactor } from './ink.js';
 
 const $ = (id) => document.getElementById(id);
@@ -655,9 +656,13 @@ export class UI {
       <section>
         <span class="k">[ Binding ]</span>
         <div class="cloths">${cloths}</div>
+        <div class="seg"><span class="mono dim">Material</span>
+          ${Object.entries(BINDINGS).map(([k, b]) => `<button type="button" class="mono-btn" data-material="${k}" aria-pressed="${bindingKind(look) === k}">${b.label}</button>`).join('')}
+          <button type="button" class="mono-btn dim" data-act="material-all">[ Use for all books ]</button>
+        </div>
         <div class="seg"><span class="mono dim">Cover</span>
           <button type="button" class="mono-btn" data-cover="image" aria-pressed="${look.coverMode === 'image'}">PDF page 1</button>
-          <button type="button" class="mono-btn" data-cover="cloth" aria-pressed="${look.coverMode === 'cloth'}">Typeset cloth</button>
+          <button type="button" class="mono-btn" data-cover="cloth" aria-pressed="${look.coverMode === 'cloth'}">Stamped title</button>
         </div>
         <div class="seg"><span class="mono dim">Spine</span>
           ${['serif', 'mono', 'sans'].map((s) => `<button type="button" class="mono-btn" data-spine="${s}" aria-pressed="${look.spineStyle === s}">${s}</button>`).join('')}
@@ -724,6 +729,17 @@ export class UI {
         body.querySelectorAll('[data-cloth]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
       }),
     );
+    body.querySelectorAll('[data-material]').forEach((b) =>
+      b.addEventListener('click', () => {
+        app.setLook(meta, { material: b.dataset.material });
+        body.querySelectorAll('[data-material]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      }),
+    );
+    body.querySelector('[data-act="material-all"]').addEventListener('click', async () => {
+      const kind = bindingKind(meta.look);
+      await app.setMaterialAll(kind);
+      this.toast(`Every book is now bound in ${BINDINGS[kind].label.toLowerCase()}, new ones too`, 2600);
+    });
     body.querySelectorAll('[data-cover]').forEach((b) =>
       b.addEventListener('click', () => {
         app.setLook(meta, { coverMode: b.dataset.cover });

@@ -202,7 +202,7 @@ diffuseColor.rgb *= col;`,
   vec2 cg = texture2D(paperCockle, vPageUv * vec2(0.8, 0.8 * asp) + paperSeed.yx).xy * 2.0 - 1.0;
   if (!gl_FrontFacing) cg = -cg;
   vec2 g = tg * toothK + cg * cockleK;
-  g.y *= asp; // three's tangent frame is scaled per uv unit; the maps are square in paper
+  g *= vec2(max(1.0, 1.0 / asp), max(1.0, asp)); // three's tangent frame is scaled per uv unit; the maps are square in paper
   normal = normalize(tbn * vec3(g, 1.0));
 }`,
       )
@@ -254,7 +254,7 @@ diffuseColor.rgb *= col;`,
 #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => 'folio-paper-3';
+  mat.customProgramCacheKey = () => 'folio-paper-4';
   return mat;
 }
 

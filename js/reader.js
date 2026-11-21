@@ -6,7 +6,7 @@ import { BookModel } from './book3d.js';
 import { Leaf, makePageMaterial, surfaceTable } from './leaf.js';
 import { InkLayer } from './ink.js';
 import { openPdf, renderPageToCanvas, renderQueue, readOutline } from './pdfdoc.js';
-import { canvasTexture, makeEndpaperTexture, makePaperCanvas } from './textures.js';
+import { canvasTexture, makePaperCanvas } from './textures.js';
 import { SHELF_Z } from './shelf.js';
 import * as store from './store.js';
 import {
@@ -101,11 +101,8 @@ export class Reader {
     this.doc = null;
     this.outline = null;
 
-    // materials: shelf book's + a real endpaper
-    this.endTex = makeEndpaperTexture(entry.look);
-    this.endTex.repeat.set(d.Wc / 5.5, d.Hc / 5.5);
-    this.endMat = new THREE.MeshStandardMaterial({ map: this.endTex, roughness: 0.92 });
-    const mats = { ...entry.mats, endpaper: this.endMat };
+    // the shelf book's own materials (the insides of the boards are the binding too)
+    const mats = entry.mats;
     app.shelf.ensureCover(entry);
     this.model = new BookModel(d, mats, { withLeftStack: true });
     this.model.group.position.copy(d.center).multiplyScalar(-1);
@@ -114,6 +111,7 @@ export class Reader {
     this.model.group.add(this.leafGroup);
     this.model.set(Math.PI, 0, 0);
 
+    app.shared.paper.fill && app.shared.paper.fill();
     // the paper's tooth at the same physical size whatever the page shape (≈6 tiles of ≈22 mm across a page)
     app.shared.paper.repeat.set(6, (6 * d.Hp) / d.Wp);
     this.placeholder = canvasTexture(makePaperCanvas(d.Wp / d.Hp, 0.3, true), { aniso: app.maxAniso });
@@ -205,8 +203,6 @@ export class Reader {
     this.leafOf.clear();
     this.root.remove(this.model.group);
     this.model.dispose();
-    this.endMat.dispose();
-    this.endTex.dispose();
     this.placeholder.dispose();
     this.blankPaper.dispose();
     this.fanPaper.forEach((t) => t.dispose());
