@@ -54,13 +54,42 @@ export const clearInk = (() => {
   return t;
 })();
 
+// The paper's look, shared by every leaf so it can be tuned in one place (and dimmed by the candle).
+const RAKE_BASE = 3.0;
+function paperUniforms(paper) {
+  if (!paper.u)
+    paper.u = {
+      paperFibre: { value: paper.fibre },
+      paperCockle: { value: paper.cockle },
+      paperRepeat: { value: paper.repeat }, // set per book so the tooth keeps its physical size
+      paperTint: { value: new THREE.Color(0xe9e8e4) },
+      showThrough: { value: 0.24 }, // how much the far side's print darkens this side at rest
+      toothK: { value: 0.45 }, // slope of the paper's felted surface
+      cockleK: { value: 0.1 }, // slope of the sheet's slow waviness
+      transmit: { value: 0.34 }, // diffuse transmittance of the sheet
+      // a soft second light skimming the page from the upper left (in book space), so the paper's relief
+      // reads even under the flat key light; only its variation is added, the page does not get brighter
+      rakeDir: { value: new THREE.Vector3(-0.55, 0.75, 0.36).normalize() },
+      rakeColor: { value: new THREE.Color(1, 0.985, 0.96).multiplyScalar(RAKE_BASE) },
+    };
+  return paper.u;
+}
+
+/** Room light level (1 = normal, lower when the candle dims the room) for the paper's skimming light. */
+export function setPaperRoomLight(paper, k) {
+  paperUniforms(paper).rakeColor.value.setRGB(1, 0.985, 0.96).multiplyScalar(RAKE_BASE * k);
+}
+
 /**
- * Paper. Physically based and rough, with what makes a page read as paper rather than card:
- *  - show-through: the other side's print, mirrored and soft, darkens this side by ≈6 % (book stock is
- *    ≈90–95 % opaque), rising to ≈13 % while the leaf is in the air;
- *  - transmission: light reaching the far face comes through the sheet, filtered by both prints, so a lifted
- *    page glows and shows its back mirrored;
- *  - fibre and formation in the albedo, the paper's tooth as a normal map, ink a little smoother than paper;
+ * Paper. Physically based and rough, with what makes a page read as paper rather than a screen:
+ *  - show-through: the other side's print, mirrored and only slightly softened, darkens this side by ≈20 %
+ *    at rest (thin book stock), more while the leaf is in the air and lit from behind; denser flocs of pulp
+ *    hide a little more of it;
+ *  - transmission: light reaching the far face comes through the sheet, filtered by both prints and the
+ *    formation, so a lifted page glows and shows its back mirrored;
+ *  - the surface: a felted tooth (≈0.3–1.5 mm) and a slow cockle as normals, lit by the scene's lights and a
+ *    soft skimming light, so the paper is visibly rough wherever light grazes it;
+ *  - formation, fibres and specks in the albedo; ink a little smoother than paper; edges a touch toned;
  *  - a gutter that dives into the spine (wide shade + narrow crease) with warm light bounced off the facing page;
  *  - grain that lives mostly in the shadows.
  */
@@ -70,26 +99,24 @@ export function makePageMaterial(paper) {
     roughness: 0.86,
     metalness: 0,
     side: THREE.DoubleSide,
-    normalMap: paper.normal,
-    normalScale: new THREE.Vector2(0.16, 0.16),
+    normalMap: paper.normal, // sampled by hand below; set so three builds the tangent frame
   });
   const u = {
+    ...paperUniforms(paper),
     mapFront: { value: blankWhite },
     mapBack: { value: blankWhite },
     inkFront: { value: clearInk },
     inkBack: { value: clearInk },
-    paperFibre: { value: paper.fibre },
-    paperRepeat: { value: paper.repeat }, // shared: set per book so fibres stay round
-    paperTint: { value: new THREE.Color(0xe9e8e4) },
+    paperSeed: { value: new THREE.Vector2() }, // every sheet is cut from a different part of the roll
     turnLift: { value: 0 }, // sin(π·t): 0 lying on a stack, 1 standing up
-    transmit: { value: 0.34 }, // diffuse transmittance of the sheet
   };
   mat.userData.u = u;
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, u);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec2 vPageUv;')
-      .replace('#include <uv_vertex>', '#include <uv_vertex>\nvPageUv = uv;');
+      .replace('#include <common>', '#include <common>\nvarying vec2 vPageUv;\nvarying vec3 vRake;\nuniform vec3 rakeDir;')
+      .replace('#include <uv_vertex>', '#include <uv_vertex>\nvPageUv = uv;')
+      .replace('#include <project_vertex>', '#include <project_vertex>\nvRake = normalize(mat3(modelViewMatrix) * rakeDir);');
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
@@ -99,11 +126,18 @@ uniform sampler2D mapBack;
 uniform sampler2D inkFront;
 uniform sampler2D inkBack;
 uniform sampler2D paperFibre;
+uniform sampler2D paperCockle;
 uniform vec2 paperRepeat;
+uniform vec2 paperSeed;
 uniform vec3 paperTint;
+uniform float showThrough;
+uniform float toothK;
+uniform float cockleK;
 uniform float turnLift;
 uniform float transmit;
+uniform vec3 rakeColor;
 varying vec2 vPageUv;
+varying vec3 vRake;
 // the other side of the sheet, in its own page coordinates
 vec3 folioOther(vec2 uv, float bias) {
   return gl_FrontFacing ? texture2D(mapBack, uv, bias).rgb : texture2D(mapFront, uv, bias).rgb;
@@ -119,22 +153,25 @@ float folioHash(vec2 p) {
         '#include <map_fragment>',
         `vec2 puv = gl_FrontFacing ? vPageUv : vec2(1.0 - vPageUv.x, vPageUv.y);
 vec2 ouv = vec2(1.0 - puv.x, puv.y); // this spot, seen from the other side
+// the two sides are never printed in perfect register: the far side sits ≈1–2 mm off, a hair skewed, so its
+// lines fall between this side's lines instead of hiding behind them
+float regX = gl_FrontFacing ? ouv.x : puv.x; // across the far (even) page
+float reg = 0.004 + 0.004 * paperSeed.x + (regX - 0.5) * (paperSeed.y - 0.5) * 0.006;
+vec2 sUv = ouv + vec2(0.0, gl_FrontFacing ? reg : -reg);
 vec3 pg = gl_FrontFacing ? texture2D(mapFront, puv).rgb : texture2D(mapBack, puv).rgb;
 vec4 ink = gl_FrontFacing ? texture2D(inkFront, puv) : texture2D(inkBack, puv);
-// show-through: soft, mirrored, subtractive (ink behind absorbs, it never lightens this side)
-vec3 ghost = (
-    folioOther(ouv, 2.5)
-  + folioOther(ouv + vec2( 0.004,  0.003), 2.5)
-  + folioOther(ouv + vec2(-0.0035, 0.004), 2.5)
-  + folioOther(ouv + vec2( 0.003, -0.004), 2.5)
-  + folioOther(ouv + vec2(-0.004, -0.003), 2.5)) * 0.2;
-vec4 oInk = folioOtherInk(ouv);
+vec4 fb = texture2D(paperFibre, vPageUv * paperRepeat * 0.5 + paperSeed);
+float dens = fb.g; // formation: where the pulp flocked thicker, less gets through
+// show-through: mirrored, a hair soft (light spreads a little in the sheet), subtractive — ink behind
+// absorbs, it never lightens this side
+vec3 ghost = 0.5 * (folioOther(sUv + vec2(0.0005, 0.0003), 0.6) + folioOther(sUv - vec2(0.0004, 0.0005), 0.6));
+vec4 oInk = folioOtherInk(sUv);
 ghost *= mix(vec3(1.0), oInk.rgb, oInk.a);
-float ghostK = 0.06 + 0.07 * turnLift;
+ghost = mix(ghost, vec3(dot(ghost, vec3(0.2126, 0.7152, 0.0722))), 0.35); // colour is muted by the fibres
+float ghostK = showThrough * (1.0 + 0.6 * turnLift) * (1.3 - 0.6 * dens);
 vec3 col = pg * mix(vec3(1.0), ghost, ghostK);
 col *= mix(vec3(1.0), ink.rgb, ink.a);
-float fib = texture2D(paperFibre, vPageUv * paperRepeat).r;
-vec3 paperCol = paperTint * (0.955 + 0.09 * fib);
+vec3 paperCol = paperTint * (0.94 + 0.12 * fb.r);
 col *= paperCol;
 float folioLum = dot(pg, vec3(0.2126, 0.7152, 0.0722));
 // the gutter: a wide shade and a narrow crease where the sheet dives into the spine
@@ -145,6 +182,9 @@ float gShade = min(0.6, 0.2 * gBand * gBand + 0.36 * gCore * gCore * gCore);
 col *= 1.0 - gShade;
 // a faint shade along the fore-edge, where the sheet turns away from the light
 col *= mix(0.92, 1.0, smoothstep(1.0, 0.965, sc));
+// edges a touch toned, as paper ages from the outside in
+float eD = min(1.0 - sc, min(vPageUv.y, 1.0 - vPageUv.y));
+col *= mix(vec3(0.955, 0.94, 0.9), vec3(1.0), smoothstep(0.0, 0.035, eD));
 diffuseColor.rgb *= col;`,
       )
       .replace(
@@ -152,11 +192,26 @@ diffuseColor.rgb *= col;`,
         `float roughnessFactor = roughness * mix(0.74, 1.0, smoothstep(0.12, 0.6, folioLum)); // ink is a touch smoother`,
       )
       .replace(
+        '#include <normal_fragment_maps>',
+        `vec3 folioN0 = normal;
+{
+  // tooth (the far face is a different part of the sheet) + cockle (the same swell, seen from behind)
+  float asp = paperRepeat.y / paperRepeat.x;
+  vec2 tuv = vPageUv * paperRepeat + paperSeed + (gl_FrontFacing ? vec2(0.0) : vec2(0.53, 0.29));
+  vec2 tg = texture2D(normalMap, tuv).xy * 2.0 - 1.0;
+  vec2 cg = texture2D(paperCockle, vPageUv * vec2(0.8, 0.8 * asp) + paperSeed.yx).xy * 2.0 - 1.0;
+  if (!gl_FrontFacing) cg = -cg;
+  vec2 g = tg * toothK + cg * cockleK;
+  g.y *= asp; // three's tangent frame is scaled per uv unit; the maps are square in paper
+  normal = normalize(tbn * vec3(g, 1.0));
+}`,
+      )
+      .replace(
         '#include <lights_fragment_end>',
         `#include <lights_fragment_end>
 {
   // light arriving on the far face comes through the sheet
-  vec3 tN = normalize(geometryNormal);
+  vec3 tN = folioN0;
   vec3 tLight = vec3(0.0);
   #if NUM_DIR_LIGHTS > 0
   #pragma unroll_loop_start
@@ -174,8 +229,13 @@ diffuseColor.rgb *= col;`,
   }
   #pragma unroll_loop_end
   #endif
-  vec3 thru = paperCol * pg * folioOther(ouv, 0.6) * mix(vec3(1.0), oInk.rgb, oInk.a) * (1.0 - gShade);
+  vec3 back = 0.5 * (folioOther(sUv + vec2(0.0006, 0.0004), 0.8) + folioOther(sUv - vec2(0.0005, 0.0006), 0.8));
+  vec3 thru = paperCol * pg * back * mix(vec3(1.0), oInk.rgb, oInk.a) * (1.0 - gShade) * (1.3 - 0.6 * dens);
   reflectedLight.directDiffuse += tLight * thru * (transmit * RECIPROCAL_PI);
+  // the skimming light: only the relief it picks out
+  vec3 R = normalize(vRake);
+  float rFace = dot(tN, R);
+  reflectedLight.directDiffuse += material.diffuseColor * rakeColor * ((dot(normal, R) - rFace) * smoothstep(-0.15, 0.2, rFace) * RECIPROCAL_PI);
   // warm light bounced off the facing page into the gutter, more where the sheet curls away from view
   float curlLift = pow(clamp(1.0 - abs(dot(tN, geometryViewDir)), 0.0, 1.0), 1.5);
   float gFall = pow(1.0 - smoothstep(0.0, 0.23, sc), 0.85);
@@ -194,7 +254,7 @@ diffuseColor.rgb *= col;`,
 #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => 'folio-paper-2';
+  mat.customProgramCacheKey = () => 'folio-paper-3';
   return mat;
 }
 
@@ -255,6 +315,8 @@ export class Leaf {
     u.mapBack.value = back || blankWhite;
     u.inkFront.value = inkFront || clearInk;
     u.inkBack.value = inkBack || clearInk;
+    const k = Math.max(0, this.k);
+    u.paperSeed.value.set((k * 0.6180339) % 1, (k * 0.4142136 + 0.37) % 1);
   }
 
   /** Recompute the sheet. env: { Wp, Hp, tabR, tabL } */

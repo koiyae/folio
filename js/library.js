@@ -3,7 +3,7 @@
 import { openPdf, readMeta, readOutline, renderPageToCanvas, analyseCover, canvasToBlob } from './pdfdoc.js';
 import { chooseLook } from './textures.js';
 import { bookDims } from './book3d.js';
-import { INKS } from './ink.js';
+import { strokePolygons, strokeLook } from './ink.js';
 import * as store from './store.js';
 
 function newId() {
@@ -113,7 +113,7 @@ function boxToPdf(u, v, page, boxAspect) {
 }
 
 export async function exportAnnotated(meta) {
-  const { PDFDocument, rgb, BlendMode, LineCapStyle } = await import('../vendor/pdf-lib/pdf-lib.esm.min.js');
+  const { PDFDocument, rgb, BlendMode } = await import('../vendor/pdf-lib/pdf-lib.esm.min.js');
   const blob = await store.getFile(meta.id);
   if (!blob) throw new Error('The PDF file is missing.');
   const bytes = await blob.arrayBuffer();
@@ -125,30 +125,34 @@ export async function exportAnnotated(meta) {
   for (const [pageNum, strokes] of marks) {
     if (pageNum < 1 || pageNum > pdf.getPageCount()) continue;
     const page = pdf.getPage(pageNum - 1);
+    // page box (u across, v down) → PDF user space is a similarity: fix it from three points
+    const o = boxToPdf(0, 0, page, boxAspect);
+    const ex = boxToPdf(1, 0, page, boxAspect);
+    const ey = boxToPdf(0, 1, page, boxAspect);
+    const W = o.boxW; // the stroke outlines are built in points, so their curves keep their detail
+    const H = W / boxAspect;
     for (const s of strokes) {
-      const ink = INKS[s.tool] || INKS.yellow;
-      const p = s.pts;
-      if (p.length < 2) continue;
+      if (!s.pts || s.pts.length < 2) continue;
+      const look = strokeLook(s);
       let path = '';
-      let boxW = 1;
-      for (let i = 0; i < p.length; i += 2) {
-        const q = boxToPdf(p[i], p[i + 1], page, boxAspect);
-        boxW = q.boxW;
-        // drawSvgPath draws relative to (0,0) with y pointing down → negate Y
-        path += `${i ? 'L' : 'M'}${q.X.toFixed(2)} ${(-q.Y).toFixed(2)} `;
+      for (const poly of strokePolygons(s, W, H)) {
+        for (let i = 0; i < poly.length; i += 2) {
+          const u = poly[i] / W;
+          const v = poly[i + 1] / H;
+          const X = o.X + (ex.X - o.X) * u + (ey.X - o.X) * v;
+          const Y = o.Y + (ex.Y - o.Y) * u + (ey.Y - o.Y) * v;
+          // drawSvgPath draws relative to (0,0) with y pointing down → negate Y
+          path += `${i ? 'L' : 'M'}${X.toFixed(2)} ${(-Y).toFixed(2)}`;
+        }
+        path += 'Z';
       }
-      if (p.length === 2) {
-        const q = boxToPdf(p[0] + 0.0005, p[1], page, boxAspect);
-        path += `L${q.X.toFixed(2)} ${(-q.Y).toFixed(2)}`;
-      }
+      // one nonzero fill per stroke: like on screen, a stroke never darkens where it crosses itself
       page.drawSvgPath(path, {
         x: 0,
         y: 0,
-        borderColor: rgb(ink.rgb[0] / 255, ink.rgb[1] / 255, ink.rgb[2] / 255),
-        borderWidth: s.w * boxW,
-        borderOpacity: ink.alpha,
-        borderLineCap: LineCapStyle.Round,
-        blendMode: s.tool === 'pen' ? BlendMode.Normal : BlendMode.Multiply,
+        color: rgb(look.rgb[0] / 255, look.rgb[1] / 255, look.rgb[2] / 255),
+        opacity: look.alpha,
+        blendMode: look.kind === 'pen' ? BlendMode.Normal : BlendMode.Multiply,
       });
       count++;
     }

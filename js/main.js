@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { Shelf, SHELF_Z } from './shelf.js';
 import { Reader } from './reader.js';
 import { Candle, CANDLE_DIM } from './candle.js';
+import { setPaperRoomLight } from './leaf.js';
 import { UI } from './ui.js';
 import { Magnifier } from './magnifier.js';
 import * as store from './store.js';
@@ -151,7 +152,7 @@ class App {
     const edge = makePageEdgeTexture();
     const grain = makeGrainTexture();
     const paper = makePaperTextures();
-    paper.repeat = new THREE.Vector2(4, 6);
+    paper.repeat = new THREE.Vector2(6, 9);
     const blank = document.createElement('canvas');
     blank.width = blank.height = 4;
     const bctx = blank.getContext('2d');
@@ -519,6 +520,7 @@ class App {
     this.canvas.setPointerCapture?.(e.pointerId);
     if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
     if (this.ui.panelMode && e.pointerType !== 'mouse') this.ui.closePanel();
+    if (this.reader.isOpen) this.ui.closePopovers();
     if (this.magnifier.enabled && this.reader.isOpen && e.pointerType === 'touch' && !this.reader.tool) {
       this.lens = { id: e.pointerId };
       this.magnifier.point(e.clientX, e.clientY - 70, this.width, this.height);
@@ -642,6 +644,10 @@ class App {
       this.ui.toggleCandlePop(false);
       return;
     }
+    if (e.key === 'Escape' && !document.getElementById('ink-pop').hidden) {
+      this.ui.toggleInkPop(false);
+      return;
+    }
     if (e.key === 'Escape' && this.ui.panelMode) {
       this.ui.closePanel();
       return;
@@ -697,6 +703,7 @@ class App {
     this.ambient.intensity = b.ambient * lerp(1, CANDLE_DIM.ambient, dim);
     this.key.intensity = b.key * lerp(1, CANDLE_DIM.key, dim);
     this.fill.intensity = b.fill * lerp(1, CANDLE_DIM.fill, dim);
+    setPaperRoomLight(this.shared.paper, lerp(1, CANDLE_DIM.key, dim));
     this.dimEl.style.opacity = (dim * (this.theme === 'dark' ? 0.25 : 1)).toFixed(3);
     if (c.group.visible && c.size > 0.01) {
       const p = c.screenFlame(this.camera, this.width, this.height);

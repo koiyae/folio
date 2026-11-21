@@ -3,6 +3,7 @@
 import { CLOTHS, themePalette } from './textures.js';
 import { clamp } from './anim.js';
 import * as store from './store.js';
+import { inkSettings, PEN_COLORS, MARKER_COLORS, RANGES, TOOL_KIND, makeStroke, drawStroke, pressureFactor } from './ink.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -92,8 +93,34 @@ export class UI {
       this.toggleCandlePop(false);
     });
     for (const id of ['rb-pink', 'rb-yellow', 'rb-pen', 'rb-eraser']) {
-      $(id).addEventListener('click', (e) => r().setTool(e.currentTarget.dataset.tool));
+      const b = $(id);
+      const tool = b.dataset.tool;
+      b.title = 'Hold for settings';
+      // press and hold (or right-click) a tool for its settings; a plain tap picks it up / puts it down
+      let timer = 0;
+      let held = false;
+      const clear = () => clearTimeout(timer);
+      b.addEventListener('pointerdown', () => {
+        held = false;
+        clear();
+        timer = setTimeout(() => {
+          held = true;
+          this.toolSettings(tool);
+        }, 420);
+      });
+      for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, clear);
+      b.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        clear();
+        held = true;
+        this.toolSettings(tool);
+      });
+      b.addEventListener('click', () => {
+        if (held) held = false;
+        else this.toolTap(tool);
+      });
     }
+    this.initInkPop();
     $('rb-pages').addEventListener('click', () => this.toggleGoto());
     const range = $('goto-range');
     const num = $('goto-num');
@@ -210,10 +237,7 @@ export class UI {
     this.body.dataset.mode = on ? 'reading' : 'shelf';
     $('open-btn').textContent = on ? 'CLOSE BOOK [-]' : 'OPEN BOOK [+]';
     $('readerbar').hidden = !on;
-    if (!on) {
-      this.toggleGoto(false);
-      this.toggleCandlePop(false);
-    }
+    if (!on) this.closePopovers();
     this.hidePills();
   }
 
@@ -262,6 +286,7 @@ export class UI {
     $('rb-candle').setAttribute('aria-expanded', String(show));
     if (show) {
       this.toggleGoto(false);
+      this.toggleInkPop(false);
       this.syncCandle(this.app.candle);
     }
   }
@@ -284,7 +309,225 @@ export class UI {
     const el = $('goto');
     const show = force ?? el.hidden;
     el.hidden = !show;
-    if (show) this.syncGoto();
+    if (show) {
+      this.toggleInkPop(false);
+      this.syncGoto();
+    }
+  }
+
+  closePopovers() {
+    if (!$('goto').hidden) this.toggleGoto(false);
+    if (!$('candle-pop').hidden) this.toggleCandlePop(false);
+    if (!$('ink-pop').hidden) this.toggleInkPop(false);
+  }
+
+  // ------------------------------------------------------------------ pen & highlighter settings
+  /** Tap: pick a tool up or put it down. With the settings open, a tap shows that tool's settings instead. */
+  toolTap(tool) {
+    const r = this.app.reader;
+    if (!$('ink-pop').hidden) {
+      if (this.inkTool === tool) this.toggleInkPop(false);
+      else this.toolSettings(tool);
+      return;
+    }
+    r.setTool(tool);
+    if (r.tool === tool) this.settingsHint();
+  }
+
+  /** Hold: pick the tool up (if it isn't already) and open its settings. */
+  toolSettings(tool) {
+    const r = this.app.reader;
+    if (r.tool !== tool) r.setTool(tool);
+    this.toggleInkPop(true, tool);
+  }
+
+  settingsHint() {
+    try {
+      if (localStorage.getItem('folio.hint.ink')) return;
+      localStorage.setItem('folio.hint.ink', '1');
+    } catch {
+      return;
+    }
+    this.toast('Press and hold a tool for its thickness, pressure and colour', 3400);
+  }
+
+  toggleInkPop(force, tool = this.inkTool) {
+    const el = $('ink-pop');
+    const show = (force ?? el.hidden) && !!tool;
+    el.hidden = !show;
+    for (const id of ['rb-pink', 'rb-yellow', 'rb-pen', 'rb-eraser']) $(id).setAttribute('aria-expanded', String(show && $(id).dataset.tool === tool));
+    if (!show) return;
+    this.toggleGoto(false);
+    this.toggleCandlePop(false);
+    this.inkTool = tool;
+    this.buildInkPop();
+  }
+
+  initInkPop() {
+    const pop = $('ink-pop');
+    $('ip-done').addEventListener('click', () => this.toggleInkPop(false));
+    $('ip-reset').addEventListener('click', () => {
+      inkSettings.reset(this.inkTool);
+      this.buildInkPop();
+    });
+    const sliders = { size: 'ip-size', pressure: 'ip-pressure', opacity: 'ip-opacity', smooth: 'ip-smooth' };
+    for (const [k, id] of Object.entries(sliders))
+      $(id).addEventListener('input', (e) => {
+        inkSettings.set(this.inkTool, k, parseFloat(e.target.value));
+        this.syncInkPop();
+      });
+    pop.querySelectorAll('[data-tip]').forEach((b) =>
+      b.addEventListener('click', () => {
+        inkSettings.set(this.inkTool, 'tip', b.dataset.tip);
+        this.syncInkPop();
+      }),
+    );
+    // keep keys typed into the sliders away from the reader's shortcuts
+    pop.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') e.stopPropagation();
+    });
+    inkSettings.onChange(() => this.syncInkSwatches());
+    this.syncInkSwatches();
+  }
+
+  buildInkPop() {
+    const tool = this.inkTool;
+    const kind = tool === 'eraser' ? 'eraser' : TOOL_KIND[tool];
+    const st = inkSettings.get(tool);
+    const names = { pen: 'Pen', marker: 'Highlighter', eraser: 'Eraser' };
+    $('ip-title').textContent = `[ ${names[kind]} ]`;
+    const show = {
+      color: kind !== 'eraser',
+      size: true,
+      pressure: kind !== 'eraser',
+      opacity: kind === 'marker',
+      smooth: kind !== 'eraser',
+      tip: kind === 'marker',
+    };
+    $('ink-pop').querySelectorAll('.ip-row').forEach((row) => (row.hidden = !show[row.dataset.k]));
+    // colours
+    const box = $('ip-colors');
+    box.textContent = '';
+    if (show.color) {
+      const list = kind === 'pen' ? PEN_COLORS : MARKER_COLORS;
+      for (const c of list) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.setAttribute('role', 'radio');
+        b.setAttribute('aria-label', c.name);
+        b.dataset.color = c.id;
+        const i = document.createElement('i');
+        i.style.setProperty('--sw', c.ui || `rgb(${c.rgb.join(',')})`);
+        b.appendChild(i);
+        b.addEventListener('click', () => {
+          inkSettings.set(tool, 'color', c.id);
+          this.syncInkPop();
+        });
+        box.appendChild(b);
+      }
+    }
+    const rng = RANGES[kind];
+    const size = $('ip-size');
+    size.min = rng.size[0];
+    size.max = rng.size[1];
+    size.value = st.size;
+    if (show.opacity) {
+      $('ip-opacity').min = rng.opacity[0];
+      $('ip-opacity').max = rng.opacity[1];
+      $('ip-opacity').value = st.opacity;
+    }
+    if (show.pressure) $('ip-pressure').value = st.pressure;
+    if (show.smooth) $('ip-smooth').value = st.smooth;
+    $('ip-note').textContent =
+      kind === 'eraser'
+        ? 'Touch a mark to lift it off the page.'
+        : this.app.penSeen
+          ? 'Pressure follows the Apple Pencil; fingers draw at an even weight.'
+          : 'With an Apple Pencil the line follows how hard you press. Fingers and mice draw at an even weight.';
+    this.syncInkPop();
+  }
+
+  syncInkPop() {
+    const tool = this.inkTool;
+    if (!tool || $('ink-pop').hidden) return;
+    const st = inkSettings.get(tool);
+    const pct = (x) => `${Math.round(x * 100)}%`;
+    $('ip-size-v').textContent = `${st.size.toFixed(1)}×`;
+    if (st.pressure != null) $('ip-pressure-v').textContent = st.pressure > 0 ? pct(st.pressure) : 'Off';
+    if (st.opacity != null) $('ip-opacity-v').textContent = pct(st.opacity);
+    if (st.smooth != null) $('ip-smooth-v').textContent = st.smooth > 0 ? pct(st.smooth) : 'Off';
+    $('ip-colors').querySelectorAll('[data-color]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.color === st.color)));
+    $('ink-pop').querySelectorAll('[data-tip]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.tip === st.tip)));
+    this.drawInkPreview();
+  }
+
+  /** A sample line on a scrap of printed paper, at roughly the size it will have on the page. */
+  drawInkPreview() {
+    const cv = $('ip-preview');
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = cv.clientWidth || 360;
+    const h = cv.clientHeight || 74;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+      cv.width = Math.round(w * dpr);
+      cv.height = Math.round(h * dpr);
+    }
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#f2f0ea';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    const tool = this.inkTool;
+    const kind = tool === 'eraser' ? 'eraser' : TOOL_KIND[tool];
+    const pageW = Math.min(700, window.innerWidth * 0.42) * dpr; // a page's width on screen, about
+    // a few lines of "type"
+    ctx.fillStyle = 'rgba(40,36,30,0.38)';
+    const lh = 0.0118 * pageW * 1.55;
+    for (let y = cv.height * 0.5 - lh * 1.5, i = 0; i < 4; i++, y += lh) {
+      let x = cv.width * 0.04;
+      const seed = [0.21, 0.13, 0.17, 0.09, 0.14, 0.2, 0.11, 0.16, 0.12];
+      for (let k = 0; x < cv.width * 0.96; k++) {
+        const ww = seed[(k + i * 3) % seed.length] * pageW * 0.42;
+        ctx.fillRect(x, y - lh * 0.22, Math.min(ww, cv.width * 0.96 - x), lh * 0.42);
+        x += ww + lh * 0.45;
+      }
+    }
+    if (kind === 'eraser') {
+      const r = 0.018 * inkSettings.get('eraser').size * pageW;
+      ctx.strokeStyle = 'rgba(25,23,21,0.8)';
+      ctx.setLineDash([3 * dpr, 3 * dpr]);
+      ctx.lineWidth = dpr;
+      ctx.beginPath();
+      ctx.arc(cv.width / 2, cv.height / 2, r, 0, Math.PI * 2);
+      ctx.stroke();
+      return;
+    }
+    const s = makeStroke(tool);
+    const sens = inkSettings.get(tool).pressure;
+    const n = 90;
+    for (let i = 0; i <= n; i++) {
+      const t = i / n;
+      const x = cv.width * (0.06 + 0.88 * t);
+      const y = kind === 'pen' ? cv.height * (0.5 + 0.26 * Math.sin(t * Math.PI * 3.2)) : cv.height * 0.5 - lh * 0.05 + Math.sin(t * 7) * lh * 0.06;
+      // a stroke as a Pencil draws it: light in, firm through the middle, lifting off
+      const p = 0.06 + 0.5 * Math.sin(Math.PI * Math.min(1, t * 1.15));
+      s.pts.push(x / pageW, y / pageW);
+      s.wf.push(pressureFactor(kind, p, sens));
+    }
+    ctx.save();
+    if (kind === 'marker') ctx.globalCompositeOperation = 'multiply';
+    drawStroke(ctx, s, pageW, pageW);
+    ctx.restore();
+  }
+
+  /** The reader bar's highlighter swatches and pen show the chosen inks. */
+  syncInkSwatches() {
+    for (const tool of ['pink', 'yellow']) {
+      const c = inkSettings.markerColor(tool);
+      const b = $(`rb-${tool}`);
+      b.querySelector('i').style.setProperty('--ink', c.ui);
+      b.setAttribute('aria-label', `${c.name} highlighter`);
+    }
+    const pc = inkSettings.penColor();
+    $('rb-pen').style.color = pc.id === 'ink' ? '' : `rgb(${pc.rgb.join(',')})`;
   }
   syncGoto() {
     const s = this.barState;

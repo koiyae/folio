@@ -544,6 +544,107 @@ body[data-mode='reading'] .esc-hint {
   margin-top: 6px;
 }
 
+/* ---------------------------------------------------------------- pen & highlighter settings */
+#ink-pop {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--safe-b) + 88px);
+  transform: translateX(-50%);
+  z-index: 9;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  padding: 12px 16px 8px;
+  width: min(400px, 94vw);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+#ink-pop[hidden],
+#ink-pop [hidden] {
+  display: none;
+}
+.ip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+#ip-preview {
+  display: block;
+  width: 100%;
+  height: 74px;
+  margin: 8px 0 6px;
+  border-top: 1px solid var(--soft);
+  border-bottom: 1px solid var(--soft);
+}
+.ip-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 44px;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+}
+.ip-l {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.ip-v {
+  font-size: 10.5px;
+  text-align: right;
+}
+.ip-row input[type='range'] {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--fg);
+  height: 28px;
+}
+.ip-colors,
+.ip-seg {
+  grid-column: 2 / 4;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ip-seg {
+  gap: 16px;
+}
+.ip-seg [aria-checked='false'] {
+  opacity: 0.4;
+}
+.ip-colors button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+}
+.ip-colors button i {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--sw);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+.ip-colors button[aria-checked='true'] i {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.2px var(--fg);
+}
+.ip-foot {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+}
+.ip-foot .note {
+  font-family: var(--sans);
+  font-size: 12px;
+  letter-spacing: 0;
+  line-height: 1.4;
+  color: var(--muted);
+  margin: 6px 0 4px;
+}
+.ip-foot .mono-btn {
+  font-size: 10.5px;
+  flex: none;
+}
+
 /* ---------------------------------------------------------------- go-to popover */
 #goto {
   position: fixed;

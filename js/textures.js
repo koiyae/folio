@@ -239,121 +239,226 @@ export function makeGrainTexture() {
   return canvasTexture(grainCanvas(), { srgb: false, repeat: [1, 1] });
 }
 
+// tileable gradient noise with separate periods along x and y (so features can lie along the grain)
+function perlinTile(px, py, r) {
+  const gx = new Float32Array(px * py);
+  const gy = new Float32Array(px * py);
+  for (let i = 0; i < gx.length; i++) {
+    const a = r() * Math.PI * 2;
+    gx[i] = Math.cos(a);
+    gy[i] = Math.sin(a);
+  }
+  return (x, y) => {
+    const fx = x * px;
+    const fy = y * py;
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    const i0 = ((x0 % px) + px) % px;
+    const j0 = ((y0 % py) + py) % py;
+    const i1 = (i0 + 1) % px;
+    const j1 = (j0 + 1) % py;
+    const a00 = j0 * px + i0;
+    const a10 = j0 * px + i1;
+    const a01 = j1 * px + i0;
+    const a11 = j1 * px + i1;
+    const n00 = gx[a00] * tx + gy[a00] * ty;
+    const n10 = gx[a10] * (tx - 1) + gy[a10] * ty;
+    const n01 = gx[a01] * tx + gy[a01] * (ty - 1);
+    const n11 = gx[a11] * (tx - 1) + gy[a11] * (ty - 1);
+    const sx = tx * tx * tx * (tx * (tx * 6 - 15) + 10);
+    const sy = ty * ty * ty * (ty * (ty * 6 - 15) + 10);
+    const a = n00 + (n10 - n00) * sx;
+    const b = n01 + (n11 - n01) * sx;
+    return a + (b - a) * sy; // ≈ −0.7 … 0.7
+  };
+}
+
+/** Height field → slope texture (R, G = dh/dx, dh/dy scaled to fill the byte range; B = height). Tiles. */
+function slopeCanvas(h, N, gain) {
+  const c = makeCanvas(N, N);
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(N, N);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < h.length; i++) {
+    if (h[i] < lo) lo = h[i];
+    if (h[i] > hi) hi = h[i];
+  }
+  const at = (x, y) => h[((y + N) % N) * N + ((x + N) % N)];
+  for (let y = 0; y < N; y++)
+    for (let x = 0; x < N; x++) {
+      // Sobel, so single-pixel noise does not dominate
+      const dx = (at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2 * at(x - 1, y) - at(x - 1, y + 1)) / 8;
+      const dy = (at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2 * at(x, y - 1) - at(x + 1, y - 1)) / 8;
+      const i = (y * N + x) * 4;
+      // tangent-space normal ∝ (−∂h/∂u, −∂h/∂v, 1); the canvas is flipped into v, so ∂h/∂v = −∂h/∂y
+      img.data[i] = clamp(128 - dx * gain * 127, 0, 255);
+      img.data[i + 1] = clamp(128 + dy * gain * 127, 0, 255);
+      img.data[i + 2] = ((at(x, y) - lo) / (hi - lo || 1)) * 255;
+      img.data[i + 3] = 255;
+    }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
 /**
- * Book paper, up close: a tileable sheet of "formation" (the cloudy flocking of pulp you see holding a page
- * to the light) and short fibres laid mostly along the grain, with a few specks. Returned twice:
- *   fibre  — grey value for the albedo (a few percent of mottling)
- *   normal — the paper's tooth, for light skimming across a curl
+ * Uncoated book paper, as it looks with light skimming across it. Three tileable maps:
+ *   tooth  — the felted surface: pits and ridges ≈ 0.3–1.5 mm, a little drawn out along the grain, plus
+ *            the odd raised fibre. Stored as slopes (R, G) and height (B). Tile ≈ 22 mm of paper.
+ *   fibre  — R: albedo (formation clouds, fibres, specks, valleys a touch darker); G: formation density,
+ *            which also decides how much light and show-through pass. Tile ≈ 44 mm.
+ *   cockle — the slow waviness a printed sheet takes on from damp and the press: a few gentle swells per page.
  */
 export function makePaperTextures(size = 512) {
   const N = size;
   const r = rng(0.2718);
-  // tileable value noise
-  const lattice = (cells) => {
-    const g = new Float32Array(cells * cells);
-    for (let i = 0; i < g.length; i++) g[i] = r();
-    return (x, y) => {
-      const fx = x * cells;
-      const fy = y * cells;
-      const x0 = Math.floor(fx);
-      const y0 = Math.floor(fy);
-      const tx = fx - x0;
-      const ty = fy - y0;
-      const sx = tx * tx * (3 - 2 * tx);
-      const sy = ty * ty * (3 - 2 * ty);
-      const at = (i, j) => g[(((j % cells) + cells) % cells) * cells + (((i % cells) + cells) % cells)];
-      const a = at(x0, y0) + (at(x0 + 1, y0) - at(x0, y0)) * sx;
-      const b = at(x0, y0 + 1) + (at(x0 + 1, y0 + 1) - at(x0, y0 + 1)) * sx;
-      return a + (b - a) * sy;
-    };
-  };
-  const octaves = [
-    [lattice(5), 0.5],
-    [lattice(11), 0.27],
-    [lattice(23), 0.15],
-    [lattice(47), 0.08],
-  ];
-  const c = makeCanvas(N, N);
-  const ctx = c.getContext('2d', { willReadFrequently: true });
-  const img = ctx.createImageData(N, N);
-  for (let y = 0; y < N; y++)
-    for (let x = 0; x < N; x++) {
-      let v = 0;
-      for (const [f, w] of octaves) v += f(x / N, y / N) * w;
-      const g = 128 + (v - 0.5) * 70; // formation: soft clouds
-      const i = (y * N + x) * 4;
-      img.data[i] = img.data[i + 1] = img.data[i + 2] = g;
-      img.data[i + 3] = 255;
-    }
-  ctx.putImageData(img, 0, 0);
 
-  // fibres: short, slightly curved, mostly along the grain (vertical), some lighter some darker
-  ctx.lineCap = 'round';
-  const fibre = (x, y, ang, len, w, light, alpha) => {
-    const dx = Math.cos(ang) * len * 0.5;
-    const dy = Math.sin(ang) * len * 0.5;
-    const bend = (r() - 0.5) * len * 0.35;
-    ctx.strokeStyle = light ? `rgba(255,255,255,${alpha})` : `rgba(0,0,0,${alpha})`;
-    ctx.lineWidth = w;
-    for (const ox of [-N, 0, N])
-      for (const oy of [-N, 0, N]) {
-        const cx = x + ox;
-        const cy = y + oy;
-        if (cx < -len || cx > N + len || cy < -len || cy > N + len) continue;
-        ctx.beginPath();
-        ctx.moveTo(cx - dx, cy - dy);
-        ctx.quadraticCurveTo(cx - Math.sin(ang) * bend, cy + Math.cos(ang) * bend, cx + dx, cy + dy);
-        ctx.stroke();
+  // ---- tooth
+  const tooth = new Float32Array(N * N);
+  {
+    const oct = [
+      [perlinTile(12, 8, r), 0.55],
+      [perlinTile(24, 16, r), 0.45],
+      [perlinTile(48, 32, r), 0.28],
+      [perlinTile(96, 72, r), 0.13],
+      [perlinTile(192, 160, r), 0.05],
+    ];
+    const pits = perlinTile(20, 20, r);
+    for (let y = 0; y < N; y++)
+      for (let x = 0; x < N; x++) {
+        const u = x / N;
+        const v = y / N;
+        let s = 0;
+        for (const [f, w] of oct) s += f(u, v) * w;
+        // felt: soft rounded bumps with sharper pits between them
+        const p = pits(u, v);
+        s -= Math.max(0, -p - 0.2) * 0.6;
+        tooth[y * N + x] = s;
       }
-  };
-  for (let i = 0; i < 2600; i++) {
-    const ang = Math.PI / 2 + (r() - 0.5) * Math.PI * 0.75;
-    const len = 5 + Math.pow(r(), 1.6) * 30;
-    const light = r() < 0.6;
-    fibre(r() * N, r() * N, ang, len, 0.5 + r() * 1.1, light, light ? 0.06 + r() * 0.12 : 0.04 + r() * 0.08);
-  }
-  // specks
-  for (let i = 0; i < 70; i++) {
-    const dark = r() < 0.6;
-    ctx.fillStyle = dark ? `rgba(40,30,20,${0.12 + r() * 0.2})` : `rgba(255,255,255,${0.2 + r() * 0.2})`;
-    const x = r() * N;
-    const y = r() * N;
-    const rad = 0.4 + r() * 0.9;
-    for (const ox of [-N, 0, N])
-      for (const oy of [-N, 0, N]) {
-        ctx.beginPath();
-        ctx.arc(x + ox, y + oy, rad, 0, Math.PI * 2);
-        ctx.fill();
-      }
+    // raised fibres lying mostly along the grain (vertical)
+    const fc = makeCanvas(N, N);
+    const fctx = fc.getContext('2d', { willReadFrequently: true });
+    fctx.fillStyle = '#000';
+    fctx.fillRect(0, 0, N, N);
+    fctx.lineCap = 'round';
+    for (let i = 0; i < 700; i++) {
+      const ang = Math.PI / 2 + (r() - 0.5) * Math.PI * 0.8;
+      const len = 10 + Math.pow(r(), 1.5) * 40;
+      const w = 1 + r() * 1.6;
+      const a = 0.25 + r() * 0.55;
+      const x = r() * N;
+      const y = r() * N;
+      const dx = Math.cos(ang) * len * 0.5;
+      const dy = Math.sin(ang) * len * 0.5;
+      const bend = (r() - 0.5) * len * 0.5;
+      fctx.strokeStyle = `rgba(255,255,255,${a})`;
+      fctx.lineWidth = w;
+      for (const ox of [-N, 0, N])
+        for (const oy of [-N, 0, N]) {
+          const cx = x + ox;
+          const cy = y + oy;
+          if (cx < -len || cx > N + len || cy < -len || cy > N + len) continue;
+          fctx.beginPath();
+          fctx.moveTo(cx - dx, cy - dy);
+          fctx.quadraticCurveTo(cx - Math.sin(ang) * bend, cy + Math.cos(ang) * bend, cx + dx, cy + dy);
+          fctx.stroke();
+        }
+    }
+    const fd = fctx.getImageData(0, 0, N, N).data;
+    for (let i = 0; i < N * N; i++) tooth[i] += (fd[i * 4] / 255) * 0.2;
   }
 
-  // height → tangent-space normal (wrapping, so it tiles)
-  const src = ctx.getImageData(0, 0, N, N).data;
-  const h = new Float32Array(N * N);
-  for (let i = 0; i < N * N; i++) h[i] = src[i * 4] / 255;
-  const nc = makeCanvas(N, N);
-  const nctx = nc.getContext('2d');
-  const nimg = nctx.createImageData(N, N);
-  const k = 2.2;
-  for (let y = 0; y < N; y++)
-    for (let x = 0; x < N; x++) {
-      const hl = h[y * N + ((x - 1 + N) % N)];
-      const hr = h[y * N + ((x + 1) % N)];
-      const hu = h[((y - 1 + N) % N) * N + x];
-      const hd = h[((y + 1) % N) * N + x];
-      let nx = (hl - hr) * k;
-      let ny = (hd - hu) * k;
-      const l = Math.hypot(nx, ny, 1);
-      const i = (y * N + x) * 4;
-      nimg.data[i] = (nx / l * 0.5 + 0.5) * 255;
-      nimg.data[i + 1] = (ny / l * 0.5 + 0.5) * 255;
-      nimg.data[i + 2] = (1 / l * 0.5 + 0.5) * 255;
-      nimg.data[i + 3] = 255;
+  // ---- albedo + formation (its own, larger tile)
+  const fibre = makeCanvas(N, N);
+  {
+    const ctx = fibre.getContext('2d', { willReadFrequently: true });
+    const form = [
+      [perlinTile(6, 5, r), 0.45],
+      [perlinTile(12, 10, r), 0.35],
+      [perlinTile(24, 20, r), 0.25],
+      [perlinTile(48, 40, r), 0.12],
+    ];
+    const fine = perlinTile(64, 48, r);
+    const img = ctx.createImageData(N, N);
+    for (let y = 0; y < N; y++)
+      for (let x = 0; x < N; x++) {
+        const u = x / N;
+        const v = y / N;
+        let f = 0;
+        for (const [fn, w] of form) f += fn(u, v) * w;
+        const i = (y * N + x) * 4;
+        const dens = clamp(0.5 + f * 0.9, 0, 1);
+        // the tooth tile repeats twice across this one, so its valleys can darken the albedo too
+        const th = tooth[((y * 2) % N) * N + ((x * 2) % N)];
+        const alb = 0.5 + f * 0.16 + fine(u, v) * 0.05 + th * 0.05;
+        img.data[i] = clamp(alb * 255, 0, 255);
+        img.data[i + 1] = dens * 255;
+        img.data[i + 2] = 128;
+        img.data[i + 3] = 255;
+      }
+    ctx.putImageData(img, 0, 0);
+    // fibres in the albedo: mostly lighter, a few darker; specks of bark and dust
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 1400; i++) {
+      const ang = Math.PI / 2 + (r() - 0.5) * Math.PI * 0.8;
+      const len = 6 + Math.pow(r(), 1.6) * 34;
+      const light = r() < 0.65;
+      const a = light ? 0.05 + r() * 0.1 : 0.04 + r() * 0.07;
+      ctx.strokeStyle = light ? `rgba(255,255,255,${a})` : `rgba(0,0,0,${a})`;
+      ctx.lineWidth = 0.7 + r() * 1.1;
+      const x = r() * N;
+      const y = r() * N;
+      const dx = Math.cos(ang) * len * 0.5;
+      const dy = Math.sin(ang) * len * 0.5;
+      const bend = (r() - 0.5) * len * 0.4;
+      for (const ox of [-N, 0, N])
+        for (const oy of [-N, 0, N]) {
+          const cx = x + ox;
+          const cy = y + oy;
+          if (cx < -len || cx > N + len || cy < -len || cy > N + len) continue;
+          ctx.beginPath();
+          ctx.moveTo(cx - dx, cy - dy);
+          ctx.quadraticCurveTo(cx - Math.sin(ang) * bend, cy + Math.cos(ang) * bend, cx + dx, cy + dy);
+          ctx.stroke();
+        }
     }
-  nctx.putImageData(nimg, 0, 0);
-  const fibreTex = canvasTexture(c, { srgb: false, repeat: [1, 1] });
-  const normalTex = canvasTexture(nc, { srgb: false, repeat: [4, 6] });
-  return { fibre: fibreTex, normal: normalTex };
+    for (let i = 0; i < 46; i++) {
+      const x = r() * N;
+      const y = r() * N;
+      const rad = 0.5 + Math.pow(r(), 2) * 1.6;
+      ctx.fillStyle = `rgba(0,0,0,${0.1 + r() * 0.22})`;
+      for (const ox of [-N, 0, N])
+        for (const oy of [-N, 0, N]) {
+          ctx.beginPath();
+          ctx.ellipse(x + ox, y + oy, rad, rad * (0.6 + r() * 0.6), r() * Math.PI, 0, Math.PI * 2);
+          ctx.fill();
+        }
+    }
+  }
+
+  // ---- cockle: a few soft swells
+  const CN = 128;
+  const cockle = new Float32Array(CN * CN);
+  {
+    const oct = [
+      [perlinTile(2, 3, r), 0.6],
+      [perlinTile(4, 5, r), 0.3],
+      [perlinTile(7, 9, r), 0.12],
+    ];
+    for (let y = 0; y < CN; y++)
+      for (let x = 0; x < CN; x++) {
+        let s = 0;
+        for (const [f, w] of oct) s += f(x / CN, y / CN) * w;
+        cockle[y * CN + x] = s;
+      }
+  }
+
+  const toothTex = canvasTexture(slopeCanvas(tooth, N, 10), { srgb: false, repeat: [6, 9] });
+  const fibreTex = canvasTexture(fibre, { srgb: false, repeat: [1, 1] });
+  const cockleTex = canvasTexture(slopeCanvas(cockle, CN, 28), { srgb: false, repeat: [1, 1] });
+  return { normal: toothTex, fibre: fibreTex, cockle: cockleTex };
 }
 
 /** Leaf edges seen from the head, tail and fore-edge: fine lines of paper. */

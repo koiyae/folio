@@ -99,6 +99,18 @@
   </div>
 </div>
 
+<div id="ink-pop" hidden aria-label="Tool settings">
+  <div class="ip-head"><span class="mono" id="ip-title">[ PEN ]</span><button type="button" class="mono-btn" id="ip-done">[ DONE ]</button></div>
+  <canvas id="ip-preview" aria-hidden="true"></canvas>
+  <div class="ip-row" data-k="color"><span class="ip-l mono">Colour</span><div class="ip-colors" id="ip-colors" role="radiogroup" aria-label="Colour"></div></div>
+  <label class="ip-row" data-k="size"><span class="ip-l mono">Thickness</span><input type="range" id="ip-size" step="0.05"><span class="ip-v mono" id="ip-size-v"></span></label>
+  <label class="ip-row" data-k="pressure"><span class="ip-l mono">Pressure</span><input type="range" id="ip-pressure" min="0" max="1" step="0.05"><span class="ip-v mono" id="ip-pressure-v"></span></label>
+  <label class="ip-row" data-k="opacity"><span class="ip-l mono">Ink</span><input type="range" id="ip-opacity" step="0.05"><span class="ip-v mono" id="ip-opacity-v"></span></label>
+  <label class="ip-row" data-k="smooth"><span class="ip-l mono">Steadiness</span><input type="range" id="ip-smooth" min="0" max="1" step="0.05"><span class="ip-v mono" id="ip-smooth-v"></span></label>
+  <div class="ip-row" data-k="tip"><span class="ip-l mono">Tip</span><div class="ip-seg" role="radiogroup" aria-label="Tip"><button type="button" class="mono-btn" data-tip="chisel" role="radio">[ Chisel ]</button><button type="button" class="mono-btn" data-tip="round" role="radio">[ Round ]</button></div></div>
+  <div class="ip-foot"><p class="note" id="ip-note"></p><button type="button" class="mono-btn" id="ip-reset">[ Reset ]</button></div>
+</div>
+
 <footer class="bottom">
   <button type="button" class="mono-btn now" id="now-btn" aria-label="Library index"><span class="tri">[&#9656;]</span> <span id="now-title">FOLIO</span></button>
   <div class="actions">

@@ -49,6 +49,7 @@ export class Reader {
     this.root.name = 'reader';
     this.root.visible = false;
     app.scene.add(this.root);
+    this.penUpAt = -1e9;
     this.pool = [];
     for (let i = 0; i < POOL; i++) this.pool.push(new Leaf(makePageMaterial(app.shared.paper)));
     this.leafOf = new Map();
@@ -113,9 +114,8 @@ export class Reader {
     this.model.group.add(this.leafGroup);
     this.model.set(Math.PI, 0, 0);
 
-    // paper fibres at the same physical size whatever the page shape (≈4 tiles across a page)
-    app.shared.paper.repeat.set(4, (4 * d.Hp) / d.Wp);
-    app.shared.paper.normal.repeat.copy(app.shared.paper.repeat);
+    // the paper's tooth at the same physical size whatever the page shape (≈6 tiles of ≈22 mm across a page)
+    app.shared.paper.repeat.set(6, (6 * d.Hp) / d.Wp);
     this.placeholder = canvasTexture(makePaperCanvas(d.Wp / d.Hp, 0.3, true), { aniso: app.maxAniso });
     this.blankPaper = canvasTexture(makePaperCanvas(d.Wp / d.Hp, 0.3, false), { aniso: 1 });
     this.fanPaper = [0.11, 0.52, 0.83].map((s) => canvasTexture(makePaperCanvas(d.Wp / d.Hp, s, true), { aniso: 4 }));
@@ -925,6 +925,14 @@ export class Reader {
   pointerDown(e) {
     if (!this.active) return;
     const ts = e.timeStamp || performance.now();
+    // palm rejection: while the Pencil writes (and a moment after), a resting hand is not a gesture
+    if (e.pointerType === 'touch' && this.tool && this.app.penSeen && ((this.drawing && this.drawing.pen) || ts - this.penUpAt < 600)) return;
+    if (e.pointerType === 'pen' && this.tool && this.phase === 'reading') {
+      // the hand came down first: forget it rather than read hand + pencil as a pinch
+      for (const [id, q] of this.pointers) if (q.type === 'touch') this.pointers.delete(id);
+      if (this.gesture && this.gesture.mode === 'turn') this.releaseDrag(true);
+      this.gesture = null;
+    }
     const p = { id: e.pointerId, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: ts, type: e.pointerType, lx: e.clientX, ly: e.clientY, lt: ts, vx: 0, vy: 0 };
     this.pointers.set(e.pointerId, p);
     if (e.pointerType === 'pen') this.app.penSeen = true;
@@ -954,13 +962,15 @@ export class Reader {
     if (drawing) {
       const hit = this.hitPage(e.clientX, e.clientY);
       if (hit) {
+        const pen = e.pointerType === 'pen';
         if (this.tool === 'eraser') {
           this.ink.eraseAt(hit.page, hit.u, hit.v);
-          this.drawing = { mode: 'erase', leaf: hit.leaf, front: hit.front };
+          this.drawing = { mode: 'erase', leaf: hit.leaf, front: hit.front, pen, id: e.pointerId };
         } else {
-          this.ink.begin(hit.page, this.tool, hit.u, hit.v);
-          this.drawing = { mode: 'ink', leaf: hit.leaf, front: hit.front, page: hit.page };
+          this.ink.begin(hit.page, this.tool, hit.u, hit.v, penPressure(e));
+          this.drawing = { mode: 'ink', leaf: hit.leaf, front: hit.front, page: hit.page, pen, id: e.pointerId };
         }
+        this.app.ui.closePopovers();
         this.app.invalidate();
         return;
       }
@@ -1012,10 +1022,14 @@ export class Reader {
       return;
     }
     if (this.drawing) {
-      const hit = this.hitPage(e.clientX, e.clientY);
-      if (hit && hit.leaf === this.drawing.leaf && hit.front === this.drawing.front) {
+      if (e.pointerId !== this.drawing.id) return;
+      // the Pencil reports at 240 Hz; take every sample the browser coalesced into this event
+      const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
+      for (const ev of evs.length ? evs : [e]) {
+        const hit = this.hitPage(ev.clientX, ev.clientY);
+        if (!hit || hit.leaf !== this.drawing.leaf || hit.front !== this.drawing.front) continue;
         if (this.drawing.mode === 'erase') this.ink.eraseAt(hit.page, hit.u, hit.v);
-        else if (hit.page === this.drawing.page) this.ink.extend(hit.u, hit.v);
+        else if (hit.page === this.drawing.page) this.ink.extend(hit.u, hit.v, penPressure(ev));
       }
       this.app.invalidate();
       return;
@@ -1055,6 +1069,8 @@ export class Reader {
     if (!p) return;
     const g = this.gesture;
     if (this.drawing) {
+      if (e.pointerId !== this.drawing.id) return;
+      if (this.drawing.pen) this.penUpAt = e.timeStamp || performance.now();
       if (this.drawing.mode === 'ink') this.ink.end();
       this.drawing = null;
       this.updateBar();
@@ -1296,6 +1312,7 @@ export class Reader {
   // =============================================================== tools & bar
   setTool(tool) {
     this.tool = this.tool === tool ? null : tool;
+    if (!this.tool) this.app.ui.toggleInkPop(false);
     this.hover.target = 0;
     this.app.canvas.style.cursor = this.tool ? 'crosshair' : 'default';
     this.updateBar();
@@ -1402,4 +1419,9 @@ export class Reader {
     }
     return false;
   }
+}
+
+/** Apple Pencil pressure (0…1); fingers and mice have none and draw at an even weight. */
+function penPressure(e) {
+  return e.pointerType === 'pen' ? Math.max(0.02, e.pressure || 0) : null;
 }
