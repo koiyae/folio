@@ -182,7 +182,6 @@ export class Reader {
     this.zoomTarget = 1;
     this.panTarget.set(0, 0);
     this.gesture = null;
-    this.app.lighting.stop('closed');
     this.phase = 'closing';
     this.tl = 0;
     this.closeFromAngle = this.model.coverAngle;
@@ -304,6 +303,7 @@ export class Reader {
       s,
       cx: fit.pos.x,
       edge: (d.Wp + d.ov) * s,
+      span: (d.Wp + d.ov) * s,
       bottomY: fit.pos.y - (d.Hc / 2) * Math.cos(lean) * s,
       topY: fit.pos.y + (d.Hc / 2) * Math.cos(lean) * s,
       nearZ: fit.pos.z + (d.Hc / 2) * Math.sin(lean) * s, // the book's lower edge, nearest to us
@@ -385,7 +385,6 @@ export class Reader {
       r.scale.setScalar(lerp(r.scale.x, P.c.scale, k));
       if (r.position.distanceToSquared(P.c.pos) > 1e-6 || 1 - Math.abs(r.quaternion.dot(P.c.quat)) > 1e-7) busy = true;
     }
-    if (this.app.lighting.anyActive) this.app.lighting.place(this.lightLayout());
 
     // zoom & pan
     const z0 = this.zoom;
@@ -834,6 +833,7 @@ export class Reader {
         }
         if (fl.dir > 0 && fl.k === this.s) {
           this.s++;
+          this.app.lighting.pagesRead += 2; // a page turned by hand (for the candle's report)
           this.flights.splice(i, 1);
           changed = true;
           again = true;
@@ -841,6 +841,7 @@ export class Reader {
         }
         if (fl.dir < 0 && fl.k === this.s - 1) {
           this.s--;
+          this.app.lighting.pagesRead += 2;
           this.flights.splice(i, 1);
           changed = true;
           again = true;

@@ -1,8 +1,7 @@
 // A fire just out of view to one side: large, low, warm light. It moves slower and wider than a candle —
 // several layers of slow noise, now and then a log settling with a brief flare — and the room around goes
 // dark and warm. The light comes in low from the side and a little from in front, so a turning leaf throws
-// a long shadow and the book's own shadow sways on the wall behind. Over the sitting the fire sinks: less
-// light, redder; at the end the embers glow a while and fade.
+// a long shadow and the book's own shadow sways on the wall behind. Put out, it sinks to embers and fades.
 
 import * as THREE from 'three';
 import { clamp, lerp, smoothstep } from './anim.js';
@@ -49,7 +48,7 @@ export class Fireside extends LightSource {
     this.group.position.set(0, 0, 0);
     this.sun.target.updateMatrixWorld();
     const cam = this.sun.shadow.camera;
-    const r = (L.edge + 4 * L.s) * 1.15;
+    const r = (L.span + 4 * L.s) * 1.15;
     cam.left = -r;
     cam.right = r;
     cam.top = r;
@@ -70,8 +69,7 @@ export class Fireside extends LightSource {
     else if (st === 'on') body = 1;
     else if (st === 'ending') body = 1 - 0.75 * smoothstep(0, this.endTime, this.stateT);
     else if (st === 'out') body = 0.25 * (1 - smoothstep(0, this.outTime, this.stateT));
-    // it sinks over the sitting
-    const sink = lerp(1, 0.5, Math.pow(this.progress, 1.3));
+    const sink = 1;
     // flicker: big slow swells, a restless middle, a little quick shiver
     const n = (a, f, o) => a * (noise1(t * f + o) - 0.5);
     let f = 1 + live * (n(0.34, 0.33, 0) + n(0.24, 1.05, 11) + n(0.12, 2.6, 23) + n(0.06, 5.4, 37));

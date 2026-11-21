@@ -93,6 +93,8 @@ class App {
     this.resize();
     this.bindInput();
     await this.loadLibrary();
+    this.lighting.restore(); // the room light left on last time
+    this.ui.syncLight(this.lighting);
     store.persist();
     requestAnimationFrame((t) => this.frame(t));
   }
@@ -268,8 +270,6 @@ class App {
   onSelect(entry) {
     this.ui.setNow(entry.meta);
     if (this.theme === 'color') this.ui.setTheme('color', entry.look);
-    this.ui.hidePills();
-    this.hoverPills = false;
   }
 
   async cycleSort() {
@@ -529,6 +529,7 @@ class App {
     if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
     if (this.ui.panelMode && e.pointerType !== 'mouse') this.ui.closePanel();
     if (this.reader.isOpen) this.ui.closePopovers();
+    else this.ui.toggleLightPop(false);
     if (this.magnifier.enabled && this.reader.isOpen && e.pointerType === 'touch' && !this.reader.tool) {
       this.lens = { id: e.pointerId };
       this.magnifier.point(e.clientX, e.clientY - 70, this.width, this.height);
@@ -569,7 +570,6 @@ class App {
       if (!sp.moved && Math.abs(dx) > 6) {
         sp.moved = true;
         this.shelf.dragStart();
-        this.ui.hidePills();
       }
       if (sp.moved) this.shelf.dragMove(dx);
       return;
@@ -594,39 +594,17 @@ class App {
       return;
     }
     if (e.type === 'pointercancel') return;
-    // tap / click on the shelf
+    // tap / click on the shelf: the face-out book opens; a spine is brought forward first
     const hit = this.shelf.pick(this.ndc(e.clientX, e.clientY));
-    if (!hit) {
-      this.ui.hidePills();
-      return;
-    }
+    if (!hit) return;
     const i = this.shelf.entryIndex(hit.entry);
-    if (i === this.shelf.selected && Math.abs(hit.entry.yaw) < 0.3) {
-      if (sp.type === 'mouse') this.openSelected();
-      else if (this.ui.pillsVisible()) this.ui.hidePills();
-      else this.showPillsFor(hit.entry);
-    } else {
-      this.shelf.select(i);
-    }
+    if (i === this.shelf.selected && Math.abs(hit.entry.yaw) < 0.3) this.openSelected();
+    else this.shelf.select(i);
   }
 
   shelfHover(x, y) {
     const hit = this.shelf.pick(this.ndc(x, y));
     this.canvas.style.cursor = hit ? 'pointer' : 'default';
-    const sel = this.shelf.entries[this.shelf.selected];
-    const over = hit && hit.entry === sel && Math.abs(sel.yaw) < 0.2;
-    if (over && !this.hoverPills) this.showPillsFor(sel);
-    else if (!over && this.hoverPills) {
-      this.ui.hidePills();
-      this.hoverPills = false;
-    }
-  }
-
-  showPillsFor(entry) {
-    const r = this.shelf.coverRect(entry);
-    if (!r) return;
-    this.ui.showPills((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-    this.hoverPills = true;
   }
 
   onWheel(e) {
@@ -635,8 +613,6 @@ class App {
       this.reader.wheel(e);
       return;
     }
-    this.ui.hidePills();
-    this.hoverPills = false;
     const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
     this.shelf.wheel(e.deltaMode === 1 ? d * 30 : d);
   }
@@ -656,6 +632,11 @@ class App {
       this.ui.toggleInkPop(false);
       return;
     }
+    if (e.key === 'l' || (e.key === 'c' && this.reader.isOpen)) {
+      this.ui.toggleLightPop();
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Escape' && this.ui.panelMode) {
       this.ui.closePanel();
       return;
@@ -663,11 +644,6 @@ class App {
     if (this.reader.isOpen) {
       if (e.key === 'm') {
         this.toggleMagnifier();
-        e.preventDefault();
-        return;
-      }
-      if (e.key === 'c' || e.key === 'l') {
-        this.ui.toggleLightPop();
         e.preventDefault();
         return;
       }
@@ -711,10 +687,10 @@ class App {
 
   /** The candle (kept for scripts and old tests). */
   get candle() {
-    return this.lighting.source('candle');
+    return this.lighting.candle;
   }
   lightCandle(minutes) {
-    this.lighting.start('candle', minutes);
+    this.lighting.lightCandle(minutes);
     this.ui.syncLight(this.lighting);
   }
 
@@ -745,7 +721,7 @@ class App {
     if (this.reader.update(dt, this.clock)) busy = true;
     if (this.magnifier.enabled && this.magnifier.update(dt)) busy = true;
     const lightFps = this.lighting.update(dt, this.camera);
-    if (this.lighting.lit && t - (this.lightUiT || 0) > 0.5) {
+    if (this.lighting.candleLit && t - (this.lightUiT || 0) > 0.5) {
       this.lightUiT = t;
       this.ui.syncLight(this.lighting);
     }
@@ -761,10 +737,6 @@ class App {
 
     // titles follow the shelf
     this.ui.updateTitles(this.shelf.p, this.shelf.selected);
-    if (this.hoverPills && busy && !this.reader.isOpen) {
-      const sel = this.shelf.entries[this.shelf.selected];
-      if (sel) this.showPillsFor(sel);
-    }
 
     // camera: zoom/pan while reading
     const cam = this.camera;

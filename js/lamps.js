@@ -1,13 +1,11 @@
-// Two lamps that stand beside (or behind) the book.
+// Two lamps: one on the table beside the book, one just out of frame.
 //
 // OilLamp — a glass table lamp: brass foot and burner, a glass font with the oil inside, a tall chimney.
 //   The flat wick burns brighter and steadier than a candle (≈2000 K); the chimney shields it, so a page
-//   turn barely moves it. The oil level drops over the sitting; at the end the wick starves, the flame
-//   shrinks and sputters and a wisp rises from the chimney.
-// DeskLamp — a banker's lamp: brass base and stem, a half-cylinder shade of green cased glass, opal white
-//   inside. A warm spot (≈2700 K) throws a soft-edged pool across the spread and casts the shadow of a
-//   turning leaf; the green glass glows. Switched on it warms up in a blink; at the end of a sitting the
-//   filament cools — redder, dimmer — and goes out.
+//   turn barely moves it. Turned down, the flame shrinks and a wisp rises from the chimney.
+// DeskLamp — a banker's lamp standing just out of frame: a warm spot (≈2700 K) throws a soft-edged pool
+//   across the spread and casts the shadow of a turning leaf; its green shade glows faintly on the wall.
+//   Switched on it warms up in a blink; switched off the filament cools — redder, dimmer — and goes out.
 
 import * as THREE from 'three';
 import { clamp, lerp, smoothstep } from './anim.js';
@@ -183,11 +181,14 @@ export class OilLamp extends LightSource {
   place(L) {
     const side = this.s.side >= 0 ? 1 : -1;
     const s = L.s;
-    let x = L.cx + side * (L.edge + 3.6 * s);
     let z = L.nearZ + 0.4 * s;
     let y = L.bottomY - 0.2 * s;
     let scale = s * 0.9;
-    if (Math.abs(x - L.camX) + 3 * s > L.halfWAt(z)) {
+    // beside the book, moving in toward it when the screen is narrow (its foot just clear of the boards)
+    const room = L.halfWAt(z) - 2.9 * s;
+    const off = Math.min(L.cx * side + L.edge + 3.6 * s, L.camX * side + room) - L.cx * side;
+    let x = L.cx + side * off;
+    if (off < L.edge + 2.5 * s) {
       // no room beside the book: nearer to us, below its lower edge, clear of the page
       scale = s * 0.5;
       z = L.nearZ + 1.2 * s;
@@ -235,7 +236,7 @@ export class OilLamp extends LightSource {
     this.lean = this.gustDir * this.gustAmp * 0.25 + 0.03 * live * wander;
 
     // oil: from near full to the last finger
-    const oilY = lerp(4.15, 1.45, this.state === 'out' || this.state === 'ending' ? 1 : this.progress);
+    const oilY = 3.5; // the font about two-thirds full
     this.oilClip.constant = 0; // set in world space below
     const wp = new THREE.Vector3(0, oilY, 0);
     this.inner.localToWorld(wp);

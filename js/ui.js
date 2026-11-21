@@ -1,4 +1,4 @@
-// DOM overlay: title marquee, footer, cover pills, reader bar, go-to popover, details / index panel, toasts.
+// DOM overlay: title marquee, footer, reader bar, go-to popover, details / index panel, toasts.
 
 import { CLOTHS, themePalette } from './textures.js';
 import { clamp } from './anim.js';
@@ -27,7 +27,6 @@ export class UI {
     this.marquee = $('marquee');
     this.track = this.marquee.querySelector('.track');
     this.titles = [];
-    this.pills = $('pills');
     this.toastEl = $('toast');
     this.panel = $('panel');
     this.panelBody = $('panel-body');
@@ -60,16 +59,6 @@ export class UI {
       else this.openIndex();
     });
     $('panel-close').addEventListener('click', () => this.closePanel());
-    $('pill-open').addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.hidePills();
-      app.openSelected();
-    });
-    $('pill-details').addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.hidePills();
-      this.openDetails(app.currentMeta());
-    });
 
     // reader bar
     const r = () => app.reader;
@@ -226,21 +215,8 @@ export class UI {
     $('open-btn').textContent = on ? 'CLOSE BOOK [-]' : 'OPEN BOOK [+]';
     $('readerbar').hidden = !on;
     if (!on) this.closePopovers();
-    this.hidePills();
   }
 
-  // ------------------------------------------------------------------ pills
-  showPills(x, y) {
-    this.pills.style.left = `${x}px`;
-    this.pills.style.top = `${y}px`;
-    this.pills.hidden = false;
-  }
-  hidePills() {
-    this.pills.hidden = true;
-  }
-  pillsVisible() {
-    return !this.pills.hidden;
-  }
 
   // ------------------------------------------------------------------ reader bar
   updateReaderBar(s) {
@@ -272,45 +248,50 @@ export class UI {
     const app = this.app;
     const pop = $('light-pop');
     const L = () => app.lighting;
-    $('rb-candle').addEventListener('click', () => this.toggleLightPop());
+    $('light-btn').addEventListener('click', () => this.toggleLightPop());
     $('lp-done').addEventListener('click', () => this.toggleLightPop(false));
     pop.querySelectorAll('[data-light]').forEach((b) =>
       b.addEventListener('click', () => {
-        // while a light burns, choosing another hands the sitting over to it
-        if (L().lit) L().switchTo(b.dataset.light);
-        else L().setChoice(b.dataset.light);
+        const id = b.dataset.light;
+        L().setChoice(id);
+        // with a room light on, choosing another room light switches over to it
+        if (!LIGHTS[id].timer && L().room && L().room !== id) L().toggle(id, true);
         this.buildLightPop();
       }),
     );
     for (const k of ['warmth', 'time', 'brightness', 'liveliness'])
       $(`lp-${k}`).addEventListener('input', (e) => {
-        L().set(this.lightId(), k, parseFloat(e.target.value));
+        L().set(L().choice, k, parseFloat(e.target.value));
         this.syncLightValues();
       });
     $('lp-clock').addEventListener('click', () => {
-      const id = this.lightId();
+      const id = L().choice;
       L().set(id, 'clock', !L().settings(id).clock);
       this.syncLightValues();
     });
     pop.querySelectorAll('[data-side]').forEach((b) =>
       b.addEventListener('click', () => {
-        L().set(this.lightId(), 'side', parseInt(b.dataset.side, 10));
+        L().set(L().choice, 'side', parseInt(b.dataset.side, 10));
         this.syncLightValues();
       }),
     );
+    $('lp-toggle').addEventListener('click', () => {
+      L().toggle(L().choice);
+      this.syncLight(L());
+    });
     pop.querySelectorAll('[data-min]').forEach((b) =>
       b.addEventListener('click', () => {
-        L().start(L().choice, b.dataset.min === 'open' ? Infinity : parseInt(b.dataset.min, 10));
+        L().lightCandle(parseInt(b.dataset.min, 10));
         this.syncLight(L());
         this.toggleLightPop(false);
       }),
     );
     pop.querySelector('[data-act="more"]').addEventListener('click', () => {
-      L().addTime(5);
+      L().addCandleTime(5);
       this.syncLight(L());
     });
-    pop.querySelector('[data-act="off"]').addEventListener('click', () => {
-      L().stop('snuffed');
+    pop.querySelector('[data-act="snuff"]').addEventListener('click', () => {
+      L().snuffCandle();
       this.syncLight(L());
       this.toggleLightPop(false);
     });
@@ -319,17 +300,11 @@ export class UI {
     });
   }
 
-  /** The light the popover is about: the one burning, or the one chosen. */
-  lightId() {
-    const L = this.app.lighting;
-    return L.lit ? L.lit.id : L.choice;
-  }
-
   toggleLightPop(force) {
     const el = $('light-pop');
     const show = force ?? el.hidden;
     el.hidden = !show;
-    $('rb-candle').setAttribute('aria-expanded', String(show));
+    $('light-btn').setAttribute('aria-expanded', String(show));
     if (show) {
       this.toggleGoto(false);
       this.toggleInkPop(false);
@@ -338,7 +313,8 @@ export class UI {
   }
 
   buildLightPop() {
-    const id = this.lightId();
+    const L = this.app.lighting;
+    const id = L.choice;
     const def = LIGHTS[id];
     $('light-pop').querySelectorAll('[data-light]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.light === id)));
     $('lp-note').textContent = def.note;
@@ -351,17 +327,16 @@ export class UI {
     if (def.warmth) range('warmth', def.warmth);
     range('brightness', def.brightness);
     if (def.liveliness) range('liveliness', def.liveliness);
-    const s = this.app.lighting.settings(id);
+    const s = L.settings(id);
     for (const k of ['warmth', 'time', 'brightness', 'liveliness']) if (s[k] != null) $(`lp-${k}`).value = s[k];
     $('lp-brightness-l').textContent = { candle: 'Brightness', oil: 'Wick', desk: 'Dimmer', fire: 'Fire', sun: 'Sun', rain: 'Daylight' }[id];
     $('lp-liveliness-l').textContent = { candle: 'Flicker', oil: 'Flicker', fire: 'Flames', sun: 'Breeze', rain: 'Rain' }[id] || 'Liveliness';
-    $('light-pop').querySelector('[data-min="open"]').hidden = !def.open;
     this.syncLightValues();
-    this.syncLight(this.app.lighting);
+    this.syncLight(L);
   }
 
   syncLightValues() {
-    const id = this.lightId();
+    const id = this.app.lighting.choice;
     const s = this.app.lighting.settings(id);
     const pct = (x) => `${Math.round(x * 100)}%`;
     if (s.warmth != null) $('lp-warmth-v').textContent = `${Math.round(s.warmth / 50) * 50} K`;
@@ -378,29 +353,40 @@ export class UI {
 
   setLightIcon(id) {
     const b = $('light-pop').querySelector(`[data-light="${id}"] svg`);
-    if (b) $('rb-light-icon').innerHTML = b.innerHTML;
+    if (b) $('light-icon').innerHTML = b.innerHTML;
   }
 
-  /** Reader-bar readout and popover state (a couple of times a second while a light is lit). */
+  /** Header button and popover state (a couple of times a second while the candle burns). */
   syncLight(L) {
-    const lit = L.lit;
-    const id = lit ? lit.id : L.choice;
-    const def = LIGHTS[id];
-    this.setLightIcon(id);
-    const left = lit ? lit.remaining : 0;
-    const open = left === Infinity;
-    const mm = open ? 0 : Math.floor(left / 60);
-    const ss = open ? 0 : Math.floor(left % 60);
-    $('rb-candle').setAttribute('aria-pressed', String(!!lit));
-    $('rb-candle').setAttribute('aria-label', lit ? (open ? `${def.label}, lit` : `${def.label}, ${mm} minutes left`) : 'Reading light');
-    $('rb-candle-time').textContent = lit ? (open ? '∞' : `${mm + (ss > 0 ? 1 : 0)}′`) : '';
+    const candle = L.candleLit;
+    const room = L.room;
+    // the header shows the room light that is on, else the candle (or the one last chosen)
+    this.setLightIcon(room || (candle ? 'candle' : L.choice));
+    const left = candle ? candle.remaining : 0;
+    const mm = Math.floor(left / 60);
+    const ss = Math.floor(left % 60);
+    const on = !!(room || candle);
+    const btn = $('light-btn');
+    btn.setAttribute('aria-pressed', String(on));
+    const parts = [];
+    if (room) parts.push(`${LIGHTS[room].label} on`);
+    if (candle) parts.push(`candle, ${mm} minutes left`);
+    btn.setAttribute('aria-label', on ? `Reading light: ${parts.join(', ')}` : 'Reading light');
+    $('light-time').textContent = candle ? `${mm + (ss > 0 ? 1 : 0)}′` : '';
     const pop = $('light-pop');
-    pop.querySelector('.lp-off').hidden = !!lit;
-    pop.querySelector('.lp-on').hidden = !lit;
-    $('lp-left').textContent = lit ? (open ? `[ ${def.label} · lit ]` : `[ ${def.label} · ${mm}:${String(ss).padStart(2, '0')} left ]`) : '';
-    $('lp-off').textContent = `[ ${def.off} ]`;
-    pop.querySelector('[data-act="more"]').hidden = open;
-    if (lit && !pop.hidden && pop.querySelector('[aria-checked="true"][data-light]')?.dataset.light !== id) this.buildLightPop();
+    pop.querySelectorAll('[data-light]').forEach((b) => b.setAttribute('data-on', String(L.isOn(b.dataset.light))));
+    const id = L.choice;
+    const isCandle = !!LIGHTS[id].timer;
+    pop.querySelector('.lp-candle-off').hidden = !isCandle || !!candle;
+    pop.querySelector('.lp-candle-on').hidden = !isCandle || !candle;
+    pop.querySelector('.lp-room').hidden = isCandle;
+    if (candle) $('lp-left').textContent = `[ ${mm}:${String(ss).padStart(2, '0')} left ]`;
+    if (!isCandle) {
+      const isOn = room === id;
+      const t = $('lp-toggle');
+      t.textContent = `[ ${isOn ? LIGHTS[id].off : LIGHTS[id].on} ]`;
+      t.setAttribute('aria-checked', String(isOn));
+    }
   }
 
   toggleGoto(force) {
@@ -661,7 +647,6 @@ export class UI {
     this.panelBody.innerHTML = html;
     this.panel.hidden = false;
     this.panelBody.scrollTop = 0;
-    this.hidePills();
   }
 
   closePanel() {

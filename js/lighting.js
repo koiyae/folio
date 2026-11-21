@@ -1,13 +1,16 @@
-// Reading lights. One light at a time lights the reading: a candle, an oil lamp, a banker's lamp, a fire
-// off to one side, a sunny window or a rainy one. Each is a finished scene (its colour, its movement, how far
-// the room dims) with a few settings kept inside what that real source can do: warmth (or time of day),
-// brightness, side, liveliness. Every light is also a sitting timer — the candle burns down, the oil runs low,
-// the fire sinks to embers, the sun's patch crosses the book, the rain eases — or burns open-ended where that
-// is true to the source (lamps, windows).
+// Reading lights. A candle for a timed sitting, and room lights you switch on and leave on: an oil lamp, a
+// banker's lamp, a fire off to one side, a sunny window or a rainy one. Each is a finished scene (its colour,
+// its movement, how far the room dims) with a few settings kept inside what that real source can do: warmth
+// (or time of day), brightness, side, liveliness.
 //
-// The manager owns the sitting (start, add time, switch light mid-sitting, put out), mixes the room's own
-// lights toward each source's mood, drives the CSS layers behind the 3D canvas (a dimmed room, a pool of
-// warm light, a window's pattern on the wall, a lightning flash), and keeps the settings.
+// One room light at a time; it stays on across books, on the shelf too, and across sessions. The candle
+// burns for its sitting (10–45 min) beside the book, alongside a room light if one is on, and reports the
+// pages read when it goes out.
+//
+// The manager places the lights around the open book or, on the shelf, around the face-out book (gliding
+// between the two), mixes the room's own lights toward the lights' moods, drives the CSS layers behind the
+// 3D canvas (a dimmed room, a pool of warm light, a window's pattern on the wall, a lightning flash), and
+// keeps the settings.
 
 import * as THREE from 'three';
 import { clamp, lerp } from './anim.js';
@@ -52,79 +55,69 @@ export function noise1(x) {
 }
 
 // ------------------------------------------------------------------ the lights on offer
-// settings: [min, max, default]. timer: true → also open-ended (∞). verbs for the readout and the toast.
+// settings: [min, max, default]. Only the candle has a timer; the rest switch on and off.
 export const LIGHTS = {
   candle: {
     label: 'Candle',
-    note: 'A pillar candle beside the book. It burns down over the sitting and flickers when a page turns.',
+    note: 'Light a candle for a sitting: it burns down beside the book, flickers when a page turns, and goes out when the time is up. It can burn alongside a room light.',
     warmth: [1700, 2100, 1900],
     brightness: [0.6, 1.4, 1],
     liveliness: [0, 1.5, 1],
     side: 1,
-    open: false,
+    timer: true,
     off: 'Put it out',
     ended: 'The candle burned down',
     out: 'Candle out',
   },
   oil: {
     label: 'Oil lamp',
-    note: 'A glass oil lamp: a steadier, brighter flame behind its chimney. The oil level drops as you read.',
+    note: 'A glass oil lamp beside the book: a steadier, brighter flame behind its chimney.',
     warmth: [1800, 2300, 2050],
     brightness: [0.6, 1.4, 1],
     liveliness: [0, 1.5, 0.6],
     side: 1,
-    open: false,
+    on: 'Light the lamp',
     off: 'Turn down the wick',
-    ended: 'The lamp ran dry',
-    out: 'Lamp out',
   },
   desk: {
     label: "Banker's lamp",
-    note: 'A green glass shade throws a steady pool of warm light across the spread.',
+    note: 'A green glass shade throws a steady pool of warm light across the page.',
     warmth: [2400, 3200, 2700],
     brightness: [0.45, 1.3, 1],
     liveliness: null,
     side: 1,
-    open: true,
+    on: 'Switch on',
     off: 'Switch off',
-    ended: 'The lamp switched off',
-    out: 'Lamp off',
   },
   fire: {
     label: 'Fireside',
-    note: 'A fire just out of view: big, slow, warm light from one side. It sinks to embers as you read.',
+    note: 'A fire just out of view: big, slow, warm light from one side, now and then a log settling.',
     warmth: [1700, 2300, 1950],
     brightness: [0.5, 1.4, 1],
     liveliness: [0, 1.5, 1],
     side: -1,
-    open: false,
+    on: 'Light the fire',
     off: 'Let it die',
-    ended: 'The fire burned down to embers',
-    out: 'Fire out',
   },
   sun: {
     label: 'Sunny window',
-    note: 'Sun through a window, leaves moving in the breeze. With a timer the patch of sun crosses the book.',
+    note: 'Sun through a window, leaves moving in the breeze. Follow your clock and the light changes with the day.',
     time: [7, 20, 16.5],
     brightness: [0.5, 1.3, 1],
     liveliness: [0, 1.5, 0.8],
     side: -1,
-    open: true,
-    off: 'Draw the curtain',
-    ended: 'The sun moved on',
-    out: 'Curtain drawn',
+    on: 'Open the curtains',
+    off: 'Draw the curtains',
   },
   rain: {
     label: 'Rainy window',
-    note: 'Soft grey daylight with rain running down the glass. With a timer, the rain eases off.',
+    note: 'Soft grey daylight, rain running down the glass, now and then lightning.',
     warmth: [5600, 7500, 6500],
     brightness: [0.5, 1.3, 1],
     liveliness: [0, 1.5, 0.8],
     side: -1,
-    open: true,
-    off: 'Draw the curtain',
-    ended: 'The rain stopped',
-    out: 'Curtain drawn',
+    on: 'Open the curtains',
+    off: 'Draw the curtains',
   },
 };
 
@@ -141,7 +134,7 @@ function defaults() {
     s[id].brightness = L.brightness[2];
     if (L.liveliness) s[id].liveliness = L.liveliness[2];
   }
-  return { choice: 'candle', settings: s };
+  return { choice: 'candle', room: null, settings: s };
 }
 
 // ------------------------------------------------------------------ base for the new lights
@@ -257,13 +250,17 @@ export class LightSource {
 }
 
 // ------------------------------------------------------------------ the manager
+const LAYOUT_VEC = ['center', 'R', 'U', 'N'];
+const LAYOUT_NUM = ['s', 'cx', 'edge', 'span', 'bottomY', 'topY', 'nearZ', 'farZ', 'camX'];
+
 export class Lighting {
   constructor(app, factories) {
     this.app = app;
     this.factories = factories; // id → (app) => source
     this.sources = {};
-    this.current = null;
-    this.sittingStart = null;
+    this.pagesRead = 0; // spreads turned one by one, ×2 — counted across books for the candle's report
+    this.sittingStart = 0;
+    this.Ls = null; // the layout the lights stand in, eased between the shelf and the open book
     this.load();
     this.dimEl = document.getElementById('room-dim');
     this.glowEl = document.getElementById('room-glow');
@@ -276,9 +273,9 @@ export class Lighting {
     this._c = new THREE.Color();
     document.addEventListener('visibilitychange', () => {
       // a sitting keeps time while the app is in the background
-      const s = this.current;
+      const c = this.sources.candle;
       if (document.hidden) this.hiddenAt = performance.now();
-      else if (this.hiddenAt && s && s.isBurning) s.elapsed += (performance.now() - this.hiddenAt) / 1000;
+      else if (this.hiddenAt && c && c.isBurning) c.elapsed += (performance.now() - this.hiddenAt) / 1000;
     });
   }
 
@@ -288,6 +285,7 @@ export class Lighting {
       const saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
       if (saved) {
         if (LIGHTS[saved.choice]) d.choice = saved.choice;
+        if (LIGHTS[saved.room] && !LIGHTS[saved.room].timer) d.room = saved.room;
         for (const id in d.settings) Object.assign(d.settings[id], (saved.settings || {})[id] || {});
       }
     } catch {
@@ -302,8 +300,18 @@ export class Lighting {
       /* not remembered */
     }
   }
+
+  /** At start-up: the room light that was on last time comes back on. */
+  restore() {
+    if (this.store.room) this.source(this.store.room).start(Infinity);
+  }
+
   get choice() {
     return this.store.choice;
+  }
+  /** The room light that is on (id), or null. */
+  get room() {
+    return this.store.room;
   }
   settings(id = this.choice) {
     return this.store.settings[id];
@@ -320,12 +328,6 @@ export class Lighting {
     if (s) s.applySettings(this.store.settings[id]);
     this.app.invalidate();
   }
-  resetSettings(id) {
-    this.store.settings[id] = defaults().settings[id];
-    this.save();
-    const s = this.sources[id];
-    if (s) s.applySettings(this.store.settings[id]);
-  }
 
   source(id) {
     if (!this.sources[id]) {
@@ -337,76 +339,91 @@ export class Lighting {
     return this.sources[id];
   }
 
-  /** The light currently lit (or burning out), if any. */
-  get lit() {
-    return this.current && this.current.isBurning ? this.current : null;
+  get candle() {
+    return this.source('candle');
+  }
+  /** The candle, while it burns. */
+  get candleLit() {
+    const c = this.sources.candle;
+    return c && c.isBurning ? c : null;
   }
   get anyActive() {
     return Object.values(this.sources).some((s) => s.active);
   }
+  isOn(id) {
+    return LIGHTS[id].timer ? !!this.candleLit : this.store.room === id;
+  }
 
-  /** Light the chosen light for `minutes` (Infinity: open-ended). */
-  start(id, minutes) {
-    if (!this.app.reader.isOpen) return;
-    this.setChoice(id);
-    const sec = minutes === Infinity ? Infinity : minutes * 60;
-    if (this.current && this.current.isBurning) this.current.stop('switch');
-    else this.sittingStart = this.app.reader.s;
-    const s = this.source(id);
-    s.start(sec);
-    this.current = s;
+  /** Switch a room light on (putting out any other room light) or off. Remembered across sessions. */
+  toggle(id, on = !this.isOn(id)) {
+    if (LIGHTS[id].timer) return;
+    const cur = this.store.room;
+    if (on) {
+      if (cur === id) return;
+      if (cur) this.source(cur).stop('switch');
+      this.source(id).start(Infinity);
+      this.store.room = id;
+    } else if (cur === id) {
+      this.source(id).stop('switch');
+      this.store.room = null;
+    }
+    this.save();
     this.app.invalidate();
   }
 
-  /** Change the light in the middle of a sitting: the new one takes over the time left. */
-  switchTo(id) {
-    const cur = this.lit;
-    this.setChoice(id);
-    if (!cur || cur.id === id) return;
-    const left = cur.remaining;
-    const elapsed = cur.elapsed;
-    cur.stop('switch');
-    const s = this.source(id);
-    const lightsOpen = LIGHTS[id].open;
-    // a light that cannot burn open-ended gets 25 minutes when it takes over an open-ended sitting
-    s.start(left === Infinity && !lightsOpen ? 25 * 60 : left === Infinity ? Infinity : left + elapsed);
-    s.elapsed = left === Infinity ? 0 : elapsed;
-    this.current = s;
+  lightCandle(minutes) {
+    this.sittingStart = this.pagesRead;
+    this.candle.start(minutes * 60);
     this.app.invalidate();
   }
-
-  addTime(minutes) {
-    if (this.lit) this.lit.addTime(minutes * 60);
+  addCandleTime(minutes) {
+    if (this.candleLit) this.candleLit.addTime(minutes * 60);
   }
-  stop(reason = 'snuffed') {
-    if (this.current) this.current.stop(reason);
+  snuffCandle() {
+    if (this.sources.candle) this.sources.candle.stop('snuffed');
   }
   gust(dir, strength) {
     for (const s of Object.values(this.sources)) if (s.active && s.gust) s.gust(dir, strength);
   }
 
+  /** The candle went out (burned down or put out): how the sitting went. */
   onSourceDone(s, { reason, minutes }) {
-    const app = this.app;
-    const r = app.reader;
-    const pages = r.isOpen && this.sittingStart != null ? Math.max(0, r.s - this.sittingStart) * 2 : 0;
-    this.sittingStart = null;
-    const L = LIGHTS[s.id];
+    if (s.id !== 'candle') return;
+    const pages = Math.max(0, this.pagesRead - this.sittingStart);
+    const L = LIGHTS.candle;
     const pp = `${pages} page${pages === 1 ? '' : 's'}`;
     const mins = `${Math.max(1, minutes)} min`;
-    if (reason === 'done') app.ui.toast(`${L.ended} · ${mins} · ${pp}`, 4200);
-    else if (reason !== 'closed' || minutes >= 1) app.ui.toast(`${L.out} · ${mins} · ${pp}`, 3000);
-    app.ui.syncLight(this);
+    this.app.ui.toast(`${reason === 'done' ? L.ended : L.out} · ${mins} · ${pp}`, reason === 'done' ? 4200 : 3000);
+    this.app.ui.syncLight(this);
   }
 
-  /** Where things stand around the open book (from the reader, every frame a light is active). */
-  place(L) {
-    for (const s of Object.values(this.sources)) if (s.active) s.place(L);
+  /** Ease the layout toward where the lights belong now (the open book, or the shelf). */
+  layout(dt) {
+    const L = this.app.reader.isOpen ? this.app.reader.lightLayout() : this.app.shelf.lightLayout();
+    if (!this.Ls || this.fresh) {
+      this.fresh = false;
+      this.Ls = { ...L, center: L.center.clone(), R: L.R.clone(), U: L.U.clone(), N: L.N.clone() };
+      return this.Ls;
+    }
+    const k = 1 - Math.exp(-dt * 5);
+    const S = this.Ls;
+    for (const n of LAYOUT_NUM) S[n] += (L[n] - S[n]) * k;
+    for (const v of LAYOUT_VEC) {
+      S[v].lerp(L[v], k);
+      if (v !== 'center') S[v].normalize();
+    }
+    S.halfWAt = L.halfWAt;
+    return S;
   }
 
   // ---------------------------------------------------------------- frame
   /** Returns the frame rate the lights need when nothing else moves (0: none). */
   update(dt, camera) {
     let fps = 0;
+    if (this.anyActive) {
+      const L = this.layout(dt);
+      for (const s of Object.values(this.sources)) if (s.active) s.place(L);
+    } else this.fresh = true; // the next light lit starts where it belongs, no glide
     for (const s of Object.values(this.sources)) if (s.update(dt, camera)) fps = Math.max(fps, s.fps);
     this.apply(camera);
     return fps;
@@ -416,61 +433,66 @@ export class Lighting {
   apply(camera) {
     const app = this.app;
     const b = app.lightBase;
+    // the room is as dark as the darkest mood (a candle by the fire doesn't darken it further)
     let amb = 1;
     let key = 1;
     let fill = 1;
-    let paperRake = 1;
+    let rake = 1;
     const ambC = this._c.copy(this.baseAmbient);
     const fillC = app.fill.color.copy(this.baseFill);
     app.key.color.copy(this.baseKey);
-    let strongest = null;
+    let darkest = null;
+    let darkness = 0;
+    let glow = null;
+    let flash = 0;
+    let wall = null;
     for (const s of Object.values(this.sources)) {
       if (s.dim <= 0) continue;
       const R = s.room;
-      amb *= lerp(1, R.ambient, s.dim);
-      key *= lerp(1, R.key, s.dim);
-      fill *= lerp(1, R.fill, s.dim);
-      paperRake *= lerp(1, R.rake ?? R.key, s.dim);
+      amb = Math.min(amb, lerp(1, R.ambient, s.dim));
+      key = Math.min(key, lerp(1, R.key, s.dim));
+      fill = Math.min(fill, lerp(1, R.fill, s.dim));
+      rake = Math.min(rake, lerp(1, R.rake ?? R.key, s.dim));
       if (R.tint) {
         ambC.lerp(R.tint, s.dim * 0.85);
         fillC.lerp(R.tint, s.dim * 0.6);
       }
-      if (!strongest || s.dim > strongest.dim) strongest = s;
+      const d = s.dim * ((s.css && s.css.dimAmount) ?? 1);
+      if (d > darkness) {
+        darkness = d;
+        darkest = s;
+      }
+      const g = s.glow ? s.glow(camera, app.width, app.height) : null;
+      if (g && (!glow || g.opacity > glow.opacity)) glow = g;
+      flash = Math.max(flash, s.flash || 0);
+      if (!wall && s.wall) wall = s.wall(camera, app.width, app.height);
     }
     app.ambient.intensity = b.ambient * amb;
     app.ambient.color.copy(ambC);
     app.key.intensity = b.key * key;
     app.fill.intensity = b.fill * fill;
-    app.onRoomLight(paperRake, amb);
+    app.onRoomLight(rake, amb);
 
     // CSS: the room behind the book
     const dark = app.theme === 'dark';
-    if (strongest) {
-      const css = strongest.css || {};
-      const d = strongest.dim;
-      const ds = this.dimEl.style;
+    const ds = this.dimEl.style;
+    if (darkest) {
+      const css = darkest.css || {};
       ds.setProperty('--d1', css.dim1 || 'rgba(26,18,10,0.34)');
       ds.setProperty('--d2', css.dim2 || 'rgba(14,9,4,0.5)');
-      ds.setProperty('--dx', css.dimX || '50%');
-      ds.opacity = (d * (css.dimAmount ?? 1) * (dark ? 0.25 : 1)).toFixed(3);
-      const g = strongest.glow ? strongest.glow(camera, app.width, app.height) : null;
-      const gs = this.glowEl.style;
-      if (g && g.opacity > 0.001) {
-        gs.setProperty('--gx', `${g.x.toFixed(1)}px`);
-        gs.setProperty('--gy', `${g.y.toFixed(1)}px`);
-        gs.setProperty('--g1', g.c1);
-        gs.setProperty('--g2', g.c2);
-        gs.setProperty('--gr', `${g.r || 30}vmin`);
-        gs.opacity = (g.opacity * (dark ? 1.2 : 1)).toFixed(3);
-      } else gs.opacity = '0';
-      this.flashEl.style.opacity = (strongest.flash || 0).toFixed(3);
-      this.drawWall(strongest.wall ? strongest.wall(camera, app.width, app.height) : null, dark);
-    } else {
-      this.dimEl.style.opacity = '0';
-      this.glowEl.style.opacity = '0';
-      this.flashEl.style.opacity = '0';
-      this.drawWall(null);
-    }
+      ds.opacity = (darkness * (dark ? 0.25 : 1)).toFixed(3);
+    } else ds.opacity = '0';
+    const gs = this.glowEl.style;
+    if (glow && glow.opacity > 0.001) {
+      gs.setProperty('--gx', `${glow.x.toFixed(1)}px`);
+      gs.setProperty('--gy', `${glow.y.toFixed(1)}px`);
+      gs.setProperty('--g1', glow.c1);
+      gs.setProperty('--g2', glow.c2);
+      gs.setProperty('--gr', `${glow.r || 30}vmin`);
+      gs.opacity = (glow.opacity * (dark ? 1.2 : 1)).toFixed(3);
+    } else gs.opacity = '0';
+    this.flashEl.style.opacity = flash.toFixed(3);
+    this.drawWall(wall, dark);
   }
 
   /** A window's light on the wall: its pattern, skewed into a patch beside the book. */

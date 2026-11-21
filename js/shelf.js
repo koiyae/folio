@@ -176,6 +176,34 @@ export class Shelf {
     e.coverState = 'none';
   }
 
+  /**
+   * Where the reading lights stand while the shelf is showing (the same fields as Reader.lightLayout):
+   * around the face-out book, on the table in front of the shelf; windows and fire light the whole row.
+   */
+  lightLayout() {
+    const app = this.app;
+    const e = this.entries[this.selected];
+    const d = e ? e.d : bookDims(300, 0.7);
+    const front = SHELF_Z + FACE_PULL; // the face-out cover
+    const halfWAt = (z) => Math.tan(((app.camera.fov * Math.PI) / 180) / 2) * (app.cameraBase.z - z) * (app.width / app.height);
+    return {
+      s: S,
+      cx: app.cameraBase.x,
+      edge: (d.closedW * S) / 2,
+      span: halfWAt(SHELF_Z) * 0.75,
+      bottomY: (-d.Hc * S) / 2,
+      topY: (d.Hc * S) / 2,
+      nearZ: front,
+      farZ: front - d.T * S,
+      camX: app.cameraBase.x,
+      halfWAt,
+      center: new THREE.Vector3(app.cameraBase.x, 0, front),
+      R: new THREE.Vector3(1, 0, 0),
+      U: new THREE.Vector3(0, 1, 0),
+      N: new THREE.Vector3(0, 0, 1),
+    };
+  }
+
   // ------------------------------------------------------------------ navigation
   get count() {
     return this.entries.length;

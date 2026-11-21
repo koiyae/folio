@@ -355,12 +355,14 @@ totalEmissiveRadiance += uGlowColor * uGlow * (exp(-waxDepth / 0.55) * 1.2 + exp
   place(L) {
     const side = this.s.side >= 0 ? 1 : -1;
     const s = L.s;
-    let x = L.cx + side * (L.edge + 3.3 * s);
     let z = L.nearZ + 0.8 * s; // a little toward us, clear of the shelf so its light doesn't scorch a spine
     let y = L.bottomY - 0.2 * s;
     let scale = s;
-    const room = L.halfWAt(z);
-    if (Math.abs(x - L.camX) + 2.7 * s > room) {
+    // beside the book, moving in toward it when the screen is narrow (its dish just clear of the boards)
+    const room = L.halfWAt(z) - 2.7 * s; // furthest the candle's middle may be from the screen's middle
+    const off = Math.min(L.cx * side + L.edge + 3.3 * s, L.camX * side + room) - L.cx * side;
+    let x = L.cx + side * off;
+    if (off < L.edge + 2.5 * s) {
       // no room beside the book (a tablet held upright): stand it on the table nearer to us, below the
       // book's lower edge, so it never covers the page
       scale = s * 0.6;

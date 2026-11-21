@@ -6,11 +6,10 @@
 // the pattern lies on the wall beside the book.
 //
 // SunWindow  — sunlight, warm at the ends of the day and near white at noon (time of day, or the clock),
-//              with leaves swaying in front of the glass. With a timer, the patch of sun crosses the book
-//              and moves off it at the end of the sitting.
+//              with leaves swaying in front of the glass.
 // RainWindow — soft overcast light, cool, the frame's shadow blurred to nothing; raindrops collect on the
 //              glass and run down it, each a small shadow with a point of light in its middle. Now and then
-//              lightning. With a timer the rain eases off.
+//              lightning.
 
 import * as THREE from 'three';
 import { clamp, lerp, smoothstep } from './anim.js';
@@ -100,7 +99,7 @@ class WindowLight extends LightSource {
     this.spot.target.position.copy(L.center).addScaledVector(L.R, off);
     this.spot.target.updateMatrixWorld();
     this.spot.position.copy(this.spot.target.position).addScaledVector(dir, D);
-    this.spot.angle = Math.atan((1.5 * L.edge) / D);
+    this.spot.angle = Math.atan((1.5 * L.span) / D);
     this.spot.shadow.camera.near = D * 0.7;
     this.spot.shadow.camera.far = D * 1.35;
   }
@@ -231,8 +230,7 @@ export class SunWindow extends WindowLight {
     this.level += (body - this.level) * (1 - Math.exp(-dt * 3));
     if (body === 0 && this.level < 0.003) this.level = 0;
     // the patch of sun crosses the book (with a timer), drifting away from the window
-    const p = this.duration === Infinity ? 0 : st === 'ending' || st === 'out' ? 1 + this.stateT / this.endTime * 0.4 : this.progress;
-    this.offset = -this.side * (-0.1 + 2.3 * smoothstep(0, 1, p));
+    this.offset = this.side * 0.1; // the patch of sun, a little toward the window
     const h = this.hour;
     const el = this.elevation;
     const k = lerp(2600, 5600, smoothstep(0.08, 0.75, el));
@@ -316,8 +314,8 @@ export class RainWindow extends WindowLight {
     const live = this.lively;
     const st = this.state;
     // the rain eases off over the sitting, and stops at the end
-    const ease = this.duration === Infinity ? 1 : st === 'ending' || st === 'out' ? 0 : 1 - 0.85 * smoothstep(0.2, 1, this.progress);
-    const rate = (6 + 30 * live) * ease * (st === 'off' ? 0 : 1);
+    // drops keep coming while the curtains are open; closed, the last ones run off
+    const rate = (6 + 30 * live) * (st === 'starting' || st === 'on' ? 1 : 0);
     this.spawnAcc += rate * dt;
     while (this.spawnAcc > 1) {
       this.spawnAcc -= 1;
