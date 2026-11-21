@@ -8,6 +8,7 @@
 
 import * as THREE from 'three';
 import { clamp, lerp, smoothstep } from './anim.js';
+import { kelvinColor } from './lighting.js';
 
 const R = 1.45; // pillar radius (world units, before scale)
 const H_FULL = 7.4;
@@ -158,14 +159,26 @@ export class Candle {
     this.height = H_FULL;
     this.reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.onDone = null;
+    this.id = 'candle';
+    this.fps = 30;
+    this.s = { warmth: 1900, brightness: 1, liveliness: 1, side: 1 };
+    this.lightColor = LIGHT_COLOR.clone();
+    this.room = { ambient: DIM.ambient, key: DIM.key, fill: DIM.fill };
+    this.css = {};
 
     this.build();
-    this.hiddenAt = 0;
-    document.addEventListener('visibilitychange', () => {
-      // a sitting keeps time while the app is in the background
-      if (document.hidden) this.hiddenAt = performance.now();
-      else if (this.hiddenAt && this.isBurning) this.elapsed += (performance.now() - this.hiddenAt) / 1000;
-    });
+  }
+
+  /** warmth (K), brightness, liveliness, side (+1 right of the book, −1 left). */
+  applySettings(s) {
+    this.s = { ...this.s, ...s };
+    kelvinColor(this.s.warmth, this.lightColor);
+    this.light.color.copy(this.lightColor);
+    this.haloU.uColor.value.copy(this.lightColor);
+    // the wax glows a deeper amber than the flame's light
+    kelvinColor(this.s.warmth - 450, this.glowU.uGlowColor.value);
+    this.rimMat.emissive.copy(this.glowU.uGlowColor.value);
+    this.poolMat.emissive.copy(this.glowU.uGlowColor.value);
   }
 
   build() {
@@ -290,7 +303,11 @@ totalEmissiveRadiance += uGlowColor * uGlow * (exp(-waxDepth / 0.55) * 1.2 + exp
   }
 
   ignite(minutes) {
-    this.duration = minutes * 60;
+    this.start(minutes * 60);
+  }
+
+  start(seconds) {
+    this.duration = seconds;
     this.elapsed = 0;
     this.state = 'lighting';
     this.stateT = 0;
@@ -299,16 +316,18 @@ totalEmissiveRadiance += uGlowColor * uGlow * (exp(-waxDepth / 0.55) * 1.2 + exp
     this.app.invalidate();
   }
 
-  addTime(minutes) {
-    if (!this.isBurning) return;
-    this.duration += minutes * 60;
+  addTime(seconds) {
+    if (this.isBurning) this.duration += seconds;
   }
 
-  /** Put it out now. reason: 'snuffed' | 'closed'. */
+  /** Put it out now. reason: 'snuffed' | 'closed' | 'switch' (another light takes over: no report). */
   snuff(reason = 'snuffed') {
     if (!this.isBurning && this.state !== 'guttering') return;
     this.endReason = reason;
     this.toSmoke();
+  }
+  stop(reason) {
+    this.snuff(reason);
   }
 
   toSmoke() {
@@ -320,7 +339,7 @@ totalEmissiveRadiance += uGlowColor * uGlow * (exp(-waxDepth / 0.55) * 1.2 + exp
 
   done(reason) {
     const cb = this.onDone;
-    if (cb) cb({ reason, minutes: Math.round(this.elapsed / 60) });
+    if (cb && reason !== 'switch') cb({ reason, minutes: Math.round(this.elapsed / 60) });
     this.endReason = null;
   }
 
@@ -332,10 +351,32 @@ totalEmissiveRadiance += uGlowColor * uGlow * (exp(-waxDepth / 0.55) * 1.2 + exp
     this.gustT = this.time;
   }
 
-  /** Stand the candle at a world position (base centre) at a given scale. */
-  place(x, y, z, scale) {
+  /** Stand the candle on the table beside the book (see Reader.lightLayout). */
+  place(L) {
+    const side = this.s.side >= 0 ? 1 : -1;
+    const s = L.s;
+    let x = L.cx + side * (L.edge + 3.3 * s);
+    let z = L.nearZ + 0.8 * s; // a little toward us, clear of the shelf so its light doesn't scorch a spine
+    let y = L.bottomY - 0.2 * s;
+    let scale = s;
+    const room = L.halfWAt(z);
+    if (Math.abs(x - L.camX) + 2.7 * s > room) {
+      // no room beside the book (a tablet held upright): stand it on the table nearer to us, below the
+      // book's lower edge, so it never covers the page
+      scale = s * 0.6;
+      z = L.nearZ + 1.2 * s;
+      y = L.bottomY - (H_FULL + FLAME_H + 0.9) * scale - 0.5 * s;
+      x = L.camX + side * (L.halfWAt(z) - 3.6 * scale);
+    }
     this.group.position.set(x, y, z);
     this.group.scale.setScalar(scale);
+  }
+
+  /** The warm pool its light makes on the wall behind (CSS px). */
+  glow(camera, w, h) {
+    if (!this.group.visible || this.size <= 0.01) return null;
+    const p = this.screenFlame(camera, w, h);
+    return { x: p.x, y: p.y, opacity: clamp(this.size, 0, 1) * this.flick * 0.42 * this.s.brightness, c1: 'rgba(255,176,96,0.95)', c2: 'rgba(255,150,70,0.42)', r: 30 };
   }
 
   // ---------------------------------------------------------------- frame
@@ -392,7 +433,7 @@ totalEmissiveRadiance += uGlowColor * uGlow * (exp(-waxDepth / 0.55) * 1.2 + exp
     this.size += (sizeTarget - this.size) * (1 - Math.exp(-dt * 14));
 
     // flicker: a free flame's ≈11 Hz pulse, slow wandering, and gusts that ring at ≈5 Hz and die away
-    const amp = this.reduced ? 0.35 : 1;
+    const amp = (this.reduced ? 0.35 : 1) * Math.min(this.s.liveliness ?? 1, this.reduced ? 0.35 : 9);
     this.gustAmp *= Math.exp(-dt / 0.9);
     const ring = this.gustAmp * Math.sin(2 * Math.PI * 5 * (t - this.gustT));
     const wander = noise1(t * 1.3) - 0.5;
@@ -437,7 +478,7 @@ totalEmissiveRadiance += uGlowColor * uGlow * (exp(-waxDepth / 0.55) * 1.2 + exp
 
     // light: same signal, slight drift with the flame
     const glow = clamp(this.size, 0, 1.3) * this.flick;
-    this.light.intensity = LIGHT_I * glow;
+    this.light.intensity = LIGHT_I * glow * this.s.brightness;
     this.light.position.set(wickTip.x + this.lean * 0.25, wickTip.y + 0.9 * this.size, 0.15);
     this.glowU.uGlow.value = 1.3 * glow;
     this.rimMat.emissiveIntensity = 0.55 * glow;
@@ -513,3 +554,4 @@ totalEmissiveRadiance += uGlowColor * uGlow * (exp(-waxDepth / 0.55) * 1.2 + exp
 }
 
 export const CANDLE_DIM = DIM;
+export { BILLBOARD_VERT, FLAME_FRAG, GLOW_FRAG, SMOKE_VERT, SMOKE_FRAG, OVER, ADDITIVE };

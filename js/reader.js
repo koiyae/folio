@@ -182,7 +182,7 @@ export class Reader {
     this.zoomTarget = 1;
     this.panTarget.set(0, 0);
     this.gesture = null;
-    this.app.candle.snuff('closed');
+    this.app.lighting.stop('closed');
     this.phase = 'closing';
     this.tl = 0;
     this.closeFromAngle = this.model.coverAngle;
@@ -288,28 +288,33 @@ export class Reader {
     return out;
   }
 
-  /** The candle stands on the same (invisible) table as the book: off its lower right corner. */
-  placeCandle() {
+  /**
+   * Where things stand around the open book, for the reading lights: the table under it, its edges, room
+   * beside it on screen, and the book's frame in the world (gutter, across, up the page, out of the page).
+   */
+  lightLayout() {
     const app = this.app;
     const d = this.d;
     const fit = this.readFit();
     const s = fit.scale;
     const lean = -READ_PITCH;
-    const bottomY = fit.pos.y - (d.Hc / 2) * Math.cos(lean) * s;
-    const nearZ = fit.pos.z + (d.Hc / 2) * Math.sin(lean) * s; // the book's lower edge, nearest to us
-    const halfWAt = (z) => Math.tan((app.camera.fov * DEG) / 2) * (app.cameraBase.z - z) * (app.width / app.height);
-    let x = fit.pos.x + (d.Wp + d.ov) * s + 3.3 * s;
-    let z = nearZ + 0.8 * s; // a little toward us, clear of the shelf so its light doesn't scorch a spine
-    let y = bottomY - 0.2 * s;
-    let scale = s;
-    if (x + 2.7 * s > app.cameraBase.x + halfWAt(z)) {
-      // no room beside the book (a tablet held upright): stand it on the table in front of the corner
-      scale = s * 0.72;
-      z = nearZ + 3.2 * s;
-      y = bottomY - 1.6 * s;
-      x = app.cameraBase.x + halfWAt(z) - 3.3 * scale;
-    }
-    app.candle.place(x, y, z, scale);
+    const g = this.model.group;
+    g.updateWorldMatrix(true, false);
+    return {
+      s,
+      cx: fit.pos.x,
+      edge: (d.Wp + d.ov) * s,
+      bottomY: fit.pos.y - (d.Hc / 2) * Math.cos(lean) * s,
+      topY: fit.pos.y + (d.Hc / 2) * Math.cos(lean) * s,
+      nearZ: fit.pos.z + (d.Hc / 2) * Math.sin(lean) * s, // the book's lower edge, nearest to us
+      farZ: fit.pos.z - (d.Hc / 2) * Math.sin(lean) * s,
+      camX: app.cameraBase.x,
+      halfWAt: (z) => Math.tan((app.camera.fov * DEG) / 2) * (app.cameraBase.z - z) * (app.width / app.height),
+      center: new THREE.Vector3(0, 0, d.tp * 0.5).applyMatrix4(g.matrixWorld),
+      R: new THREE.Vector3(1, 0, 0).transformDirection(g.matrixWorld),
+      U: new THREE.Vector3(0, 1, 0).transformDirection(g.matrixWorld),
+      N: new THREE.Vector3(0, 0, 1).transformDirection(g.matrixWorld),
+    };
   }
 
   applyPose(p) {
@@ -380,7 +385,7 @@ export class Reader {
       r.scale.setScalar(lerp(r.scale.x, P.c.scale, k));
       if (r.position.distanceToSquared(P.c.pos) > 1e-6 || 1 - Math.abs(r.quaternion.dot(P.c.quat)) > 1e-7) busy = true;
     }
-    if (this.app.candle.active) this.placeCandle();
+    if (this.app.lighting.anyActive) this.app.lighting.place(this.lightLayout());
 
     // zoom & pan
     const z0 = this.zoom;
@@ -670,7 +675,7 @@ export class Reader {
       return false;
     }
     this.flights.push(this.autoFlight(k, +1));
-    this.app.candle.gust(+1, 0.8);
+    this.app.lighting.gust(+1, 0.8);
     this.prefetchSpread(this.s + fwd + 1, 1);
     this.app.invalidate();
     return true;
@@ -686,7 +691,7 @@ export class Reader {
       return false;
     }
     this.flights.push(this.autoFlight(k, -1));
-    this.app.candle.gust(-1, 0.8);
+    this.app.lighting.gust(-1, 0.8);
     this.prefetchSpread(this.s - back - 1, 1);
     this.app.invalidate();
     return true;
@@ -753,7 +758,7 @@ export class Reader {
       });
     }
     this.fan = { s0, s1, dir, start: time, total, leaves, m };
-    this.app.candle.gust(dir, 1.15);
+    this.app.lighting.gust(dir, 1.15);
     this.app.invalidate();
   }
 
@@ -1200,7 +1205,7 @@ export class Reader {
     else complete = (fl.t < 0.58 || flick < -450) && flick < 450;
     fl.mode = 'settle';
     fl.goal = complete ? (fl.dir > 0 ? 1 : 0) : fl.dir > 0 ? 0 : 1;
-    if (complete) this.app.candle.gust(fl.dir, 0.55 + Math.min(0.6, Math.abs(flick) / 2500));
+    if (complete) this.app.lighting.gust(fl.dir, 0.55 + Math.min(0.6, Math.abs(flick) / 2500));
     // carry some of the hand's speed into the settle
     fl.tv.v += clamp(flick / 2500, -1.5, 1.5);
     this.app.invalidate();
