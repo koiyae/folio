@@ -55,7 +55,7 @@ export const clearInk = (() => {
 })();
 
 // The paper's look, shared by every leaf so it can be tuned in one place (and dimmed by the candle).
-const RAKE_BASE = 1.0;
+const RAKE_BASE = 1.8;
 function paperUniforms(paper) {
   if (!paper.u)
     paper.u = {
@@ -64,22 +64,24 @@ function paperUniforms(paper) {
       paperRepeat: { value: paper.repeat }, // set per book so the fibres keep their physical size
       paperTint: { value: new THREE.Color(0xe9e8e4) },
       showThrough: { value: 0.24 }, // how much the far side's print darkens this side at rest
-      toothK: { value: 0.22 }, // slope of the paper's fibre streaks and cloud
-      grainK: { value: 0.22 }, // the paper's fine grain in its colour (≈1 % of brightness on screen, zoomed in)
-      mottleK: { value: 0.08 }, // the fibre streaks and cloud of the surface, in its colour too
+      toothK: { value: 0.3 }, // slope of the paper's fibre streaks, fine tooth and cloud: most of what you see
+      grainK: { value: 0.06 }, // a little fine grain in the paper's colour; the visible texture is relief
+      mottleK: { value: 0.03 }, // the surface's streaks and cloud, faintly in its colour too
       cockleK: { value: 0.04 }, // slope of the sheet's slow waviness
       transmit: { value: 0.34 }, // diffuse transmittance of the sheet
       // a soft second light skimming the page from the upper left (in book space), so the paper's relief
       // reads even under the flat key light; only its variation is added, the page does not get brighter
       rakeDir: { value: new THREE.Vector3(-0.55, 0.75, 0.36).normalize() },
       rakeColor: { value: new THREE.Color(1, 0.985, 0.96).multiplyScalar(RAKE_BASE) },
+      rakeBase: { value: RAKE_BASE }, // the skimming light's strength in a fully lit room (not a shader input)
     };
   return paper.u;
 }
 
 /** Room light level (1 = normal, lower when the candle dims the room) for the paper's skimming light. */
 export function setPaperRoomLight(paper, k) {
-  paperUniforms(paper).rakeColor.value.setRGB(1, 0.985, 0.96).multiplyScalar(RAKE_BASE * k);
+  const u = paperUniforms(paper);
+  u.rakeColor.value.setRGB(1, 0.985, 0.96).multiplyScalar(u.rakeBase.value * k);
 }
 
 /**
