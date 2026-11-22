@@ -9,10 +9,9 @@ import * as THREE from 'three';
 import { BookModel, bookDims, makeBookMaterials, restyleBookMaterials, SHELF_SCALE } from './book3d.js';
 import { setBindingArt } from './binding.js';
 import { makeClothCoverCanvas, makeImageCoverCanvas, makeSpineCanvas, stampedTexture } from './textures.js';
-import { makeBookend, makeLabel, makePlank, PLANK_T } from './shelfdeco.js';
-import { flagsOf, shelfFlagMesh, Ribbon, shelfRibbonExit, layShelfRibbon, ribbonColor, flagScreenBox, pickBox } from './markers.js';
+import { makeBookend, makeLabel, makePlank, labelText } from './shelfdeco.js';
+import { flagsOf, shelfFlagMesh, flagScreenBox, pickBox } from './markers.js';
 
-const _E = new THREE.Vector3();
 import { clamp, smoothDamp, smoothstep } from './anim.js';
 import * as store from './store.js';
 
@@ -56,7 +55,8 @@ export class Shelf {
     this.onRowChange = null;
     this.ghosts = [];
     this.raycaster = new THREE.Raycaster();
-    this.plankStyle = 'oak';
+    this.plankStyle = 'none';
+    this.rowSpacing = ROW_SPACING;
     this.dark = false;
     this.lift = null;
   }
@@ -265,26 +265,14 @@ export class Shelf {
     this.syncMarkers(e);
   }
 
-  // ------------------------------------------------------------------ ribbons and flags
-  /**
-   * A book's ribbon (a book you are reading: it marks your place, lying on the plank) and its flags (pages
-   * you marked or bookmarked, sticking out of the top). Rebuilt only when they change.
-   */
+  // ------------------------------------------------------------------ flags
+  /** A book's flags (the spreads you bookmarked, sticking out of the top). Rebuilt only when they change. */
   syncMarkers(e) {
-    const m = e.meta;
-    const s = m.spread || 0;
-    const hex = s > 0 && s < e.d.leaves ? ribbonColor(m.look) : null;
-    const flags = flagsOf(m);
-    const sig = `${hex}|${s}|${e.liftedFlag || ''}|${flags.map((f) => f.key + f.tone + f.u.toFixed(3)).join(',')}`;
+    const flags = flagsOf(e.meta);
+    const sig = `${e.liftedFlag || ''}|${flags.map((f) => f.key + f.u.toFixed(3)).join(',')}`;
     if (e.marks && e.marks.sig === sig) return;
     this.clearMarkers(e);
-    const marks = { sig, flags, ribbon: null, ribbonKey: '', flagMesh: null, items: [] };
-    if (hex) {
-      // the ribbon lies on the plank in the shelf's own space (see placeRibbon)
-      marks.ribbon = new Ribbon(hex, 18);
-      marks.ribbon.mesh.visible = false;
-      this.group.add(marks.ribbon.mesh);
-    }
+    const marks = { sig, flags, flagMesh: null, items: [] };
     const fm = shelfFlagMesh(e.d, flags, e.liftedFlag || null);
     if (fm) {
       marks.flagMesh = fm.mesh;
@@ -298,43 +286,11 @@ export class Shelf {
   clearMarkers(e) {
     const k = e.marks;
     if (!k) return;
-    if (k.ribbon) {
-      this.group.remove(k.ribbon.mesh);
-      k.ribbon.dispose();
-    }
     if (k.flagMesh) {
       e.model.group.remove(k.flagMesh);
       k.flagMesh.geometry.dispose();
     }
     e.marks = null;
-  }
-
-  /**
-   * A reading book's ribbon: out from under it, across the plank toward you, over the edge. Laid again only
-   * when the book has moved.
-   */
-  placeRibbon(e, rowY) {
-    const r = e.marks && e.marks.ribbon;
-    if (!r) return;
-    r.mesh.visible = e.slot.visible;
-    if (!r.mesh.visible) return;
-    const sp = e.slot.position;
-    const key = `${sp.x.toFixed(3)},${sp.y.toFixed(3)},${sp.z.toFixed(3)},${e.slot.rotation.y.toFixed(4)},${this.plankStyle}`;
-    if (key === e.marks.ribbonKey) return;
-    e.marks.ribbonKey = key;
-    e.slot.updateMatrixWorld(true);
-    shelfRibbonExit(e.d, e.meta.spread || 0, _E).applyMatrix4(e.model.group.matrixWorld);
-    const pl = this.plankUnder();
-    const drop = pl ? pl.drop : 0;
-    const sway = e.meta.id.charCodeAt(e.meta.id.length - 1) % 2 ? 1 : -1;
-    layShelfRibbon(r, _E, rowY + BASE_Y, FRONT_Z, drop, sway);
-  }
-
-  /** The plank of the shelf in view (an open book rests on it): { top, front, drop, style }, or null. */
-  plankUnder() {
-    if (this.plankStyle === 'none') return null;
-    const style = this.plankStyle;
-    return { top: (this.rowPos - this.r) * ROW_SPACING + BASE_Y, front: FRONT_Z, drop: style === 'glass' ? 0.75 : PLANK_T * 0.82, style };
   }
 
   /** Raise one flag of a book (a first tap on it), or lower it (key null). */
@@ -392,14 +348,14 @@ export class Shelf {
     if (row.sections && (row.sections.length > 1 || row.editableSections)) {
       row.sections.forEach((s, i) => {
         if (!s.label) return; // a shelf's books outside any section stand first, unlabelled
-        const m = makeLabel(s.label, LABEL_H);
+        const m = makeLabel(labelText(s.label), LABEL_H);
         m.userData.tab = { section: i };
         this.group.add(m);
         deco.labels.push(m);
       });
     }
     if (this.mode === 'case') {
-      const m = makeLabel(row.label || 'Shelf', LABEL_H * 1.15, { strong: true });
+      const m = makeLabel(labelText(row.label) || 'Shelf', LABEL_H * 1.15, { strong: true });
       m.userData.plate = { row };
       this.group.add(m);
       deco.plate = m;
@@ -473,7 +429,7 @@ export class Shelf {
     const e = this.entries[this.selected];
     const d = e ? e.d : bookDims(300, 0.7);
     const front = SHELF_Z + FACE_PULL; // the face-out cover
-    const rowY = (this.rowPos - this.r) * ROW_SPACING;
+    const rowY = (this.rowPos - this.r) * this.rowSpacing;
     const halfWAt = (z) => Math.tan(((app.camera.fov * Math.PI) / 180) / 2) * (app.cameraBase.z - z) * (app.width / app.height);
     return {
       s: S,
@@ -586,14 +542,14 @@ export class Shelf {
     if (!this.rowDragging) return;
     const wpp = this.app.worldPerPx(SHELF_Z);
     // the finger carries the bookcase: up shows the shelf below
-    this.rowPos = clamp(this.rowPos0 - (dyPx * wpp) / ROW_SPACING, -0.35, this.rows.length - 1 + 0.35);
+    this.rowPos = clamp(this.rowPos0 - (dyPx * wpp) / this.rowSpacing, -0.35, this.rows.length - 1 + 0.35);
     this.app.invalidate();
   }
   rowDragEnd(vyPx) {
     if (!this.rowDragging) return;
     this.rowDragging = false;
     const wpp = this.app.worldPerPx(SHELF_Z);
-    const fling = (-vyPx * wpp) / ROW_SPACING;
+    const fling = (-vyPx * wpp) / this.rowSpacing;
     // a fifth of a shelf, or a flick, is enough to go to the next one
     const moved = this.rowPos - this.r + clamp(fling * 0.25, -1, 1);
     const target = Math.abs(moved) > 0.2 ? this.r + Math.sign(moved) * Math.max(1, Math.round(Math.abs(moved))) : this.r;
@@ -722,18 +678,21 @@ export class Shelf {
           moving = true;
         }
       }
-    // ribbons lie where their books stand now
-    for (const e of this.all.values()) if (e.marks && e.marks.ribbon) this.placeRibbon(e, (this.rowPos - e.row) * ROW_SPACING);
     return moving || this.dragging;
   }
 
   updateRow(row, ri, dt) {
     const n = row.entries.length;
     const current = ri === this.r;
-    const rowY = (this.rowPos - ri) * ROW_SPACING;
-    // the shelf below peeks in at the bottom; the one above stays out of the header until you go to it
+    const rowY = (this.rowPos - ri) * this.rowSpacing;
+    // the shelf below peeks in at the bottom; the one above stays out of the header until you go to it. On a
+    // tall screen the one below would run under the footer, so there it only shows while the bookcase moves;
+    // while a book is open only its own shelf stands (the reader bar sits where the next would peek in)
     const rel = ri - this.rowPos;
-    const visible = rel > -0.55 && rel < 1.7;
+    const app = this.app;
+    const caseMoving = this.rowDragging || Math.abs(this.rowPos - this.r) > 0.02;
+    const below = app.reader && app.reader.isOpen ? 0.55 : caseMoving || app.width > app.height ? 1.7 : 0.55;
+    const visible = rel > -0.55 && rel < below;
     this.updateDeco(row, rowY, visible);
     if (!n) return false;
     let moving = false;
@@ -830,8 +789,10 @@ export class Shelf {
       d.ends[1].position.set(last.x + last.footprint / 2 + 0.05, rowY + BASE_Y, zMid);
       for (const b of d.ends) b.visible = visible;
     }
+    const reading = !!(this.app.reader && this.app.reader.isOpen);
     if (d && d.labels.length) {
       const yL = rowY + BASE_Y - (this.plankStyle === 'none' ? 0.7 : (d.plank ? d.plank.userData.thickness : 1.3) / 2);
+      const placed = [];
       d.labels.forEach((m) => {
         const s = row.sections[m.userData.tab.section];
         if (!s || s.to <= s.from) return void (m.visible = false);
@@ -853,8 +814,18 @@ export class Shelf {
           }
         }
         m.position.set(mid, yL, FRONT_Z + 0.03);
-        m.visible = visible && !hide;
+        // while a book is open the labels step away (they would hang in front of it)
+        m.visible = visible && !hide && !reading;
+        if (m.visible) placed.push({ m, l: mid - m.userData.width / 2, r: mid + m.userData.width / 2, own: current && row.selected >= s.from && row.selected < s.to });
       });
+      // labels wider than their sections (one-book sections, long names) would run into each other: the face-out
+      // book's label always shows, then the others from the middle out, each only if it touches none already shown
+      placed.sort((p, q) => (q.own ? 1 : 0) - (p.own ? 1 : 0) || Math.abs(p.l + p.r) - Math.abs(q.l + q.r));
+      const shown = [];
+      for (const p of placed) {
+        if (shown.some((q) => p.l < q.r + 0.35 && p.r > q.l - 0.35)) p.m.visible = false;
+        else shown.push(p);
+      }
     }
     return moving;
   }
@@ -871,7 +842,7 @@ export class Shelf {
       const halfW = Math.tan(((app.camera.fov * Math.PI) / 180) / 2) * (app.cameraBase.z - FRONT_Z) * (app.width / app.height);
       const t = d.plank ? d.plank.userData.thickness : 1.3;
       d.plate.position.set(app.cameraBase.x - halfW * 0.9 + d.plate.userData.width / 2, rowY + BASE_Y - (this.plankStyle === 'none' ? 0.8 : t / 2), FRONT_Z + 0.04);
-      d.plate.visible = visible && Math.abs(this.rows.indexOf(row) - this.rowPos) < 0.6;
+      d.plate.visible = visible && Math.abs(this.rows.indexOf(row) - this.rowPos) < 0.6 && !(this.app.reader && this.app.reader.isOpen);
     }
     if (!row.entries.length) for (const b of d.ends) b.visible = false;
   }

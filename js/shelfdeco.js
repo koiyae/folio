@@ -135,6 +135,15 @@ export function makeBookend(depth) {
 
 // ------------------------------------------------------------------ labels
 /**
+ * What a label says: for a folder's section only its own name ("3_Commentaries / Protagoras" → "Protagoras"),
+ * without the number that orders it or underscores; the shelf behind it already says the rest.
+ */
+export function labelText(name) {
+  const last = String(name || '').split(' / ').pop();
+  return last.replace(/^\d+[\s._-]+/, '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim() || last;
+}
+
+/**
  * A brass label holder with a paper card: `text` in mono caps. Returns a mesh facing +z, its height `h`
  * world units, centred on its origin; userData.width is its width.
  */
@@ -144,8 +153,11 @@ export function makeLabel(text, h, { strong = false } = {}) {
   const H = Math.round(h * px);
   const probe = canvas(8, 8).getContext('2d');
   const fs = Math.round(H * (strong ? 0.5 : 0.46));
-  probe.font = `500 ${fs}px ${FONTS.mono}`;
-  const tw = probe.measureText(t).width + fs * 0.35 * t.length * 0.12;
+  // the app's own mono, as its buttons set it: IBM Plex Mono 400, caps, 0.04em apart
+  const font = `400 ${fs}px ${FONTS.mono}`;
+  const spacing = fs * 0.04;
+  probe.font = font;
+  const tw = probe.measureText(t).width + spacing * t.length;
   const frame = Math.max(3, Math.round(H * 0.12));
   const W = Math.ceil(Math.max(tw + H * 0.9 + frame * 2, H * 2.2)); // a single letter still gets a proper tab
   const c = canvas(W * 2, H * 2);
@@ -162,10 +174,10 @@ export function makeLabel(text, h, { strong = false } = {}) {
   ctx.fillStyle = 'rgba(60,40,10,0.2)';
   ctx.fillRect(frame, frame, W - 2 * frame, Math.max(1, frame * 0.35));
   ctx.fillStyle = '#2b2723';
-  ctx.font = `500 ${fs}px ${FONTS.mono}`;
+  ctx.font = font;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  if ('letterSpacing' in ctx) ctx.letterSpacing = `${(fs * 0.12).toFixed(1)}px`;
+  if ('letterSpacing' in ctx) ctx.letterSpacing = `${spacing.toFixed(1)}px`;
   ctx.fillText(t, W / 2, H / 2 + fs * 0.04);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;

@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { BookModel } from './book3d.js';
 import { Leaf, makePageMaterial, surfaceTable, NX, NY } from './leaf.js';
-import { FLAG, flagsOf, inkPagesOf, makeFlagMesh, flagMatrix, flagScreenBox, pickBox, Ribbon, ribbonColor, layerAt } from './markers.js';
+import { FLAG, flagsOf, makeFlagMesh, flagMatrix, flagScreenBox, pickBox, layerAt } from './markers.js';
 import { InkLayer } from './ink.js';
 import { openPdf, renderPageToCanvas, renderQueue, readOutline } from './pdfdoc.js';
 import { canvasTexture, makePaperCanvas } from './textures.js';
@@ -37,8 +37,6 @@ const _T = new THREE.Vector3();
 const _U = new THREE.Vector3();
 const _N = new THREE.Vector3();
 const _w = new THREE.Vector3();
-const _g = new THREE.Vector3();
-const _X = new THREE.Vector3(1, 0, 0);
 
 function pose() {
   return { pos: new THREE.Vector3(), quat: new THREE.Quaternion(), scale: 1 };
@@ -87,7 +85,7 @@ export class Reader {
   }
 
   // =============================================================== open / close
-  /** `at`: open at this spread instead of where you left off (a flag, the contents); the ribbon keeps your place. */
+  /** `at`: open at this spread instead of where you left off (a flag, the contents); your place is kept. */
   async open(entry, { at = null } = {}) {
     if (this.active) return;
     const app = this.app;
@@ -137,14 +135,8 @@ export class Reader {
     app.shelf.hiddenEntry = entry;
     app.shelf.openGapWidth = this.computeGapWidth();
 
-    this.ink = new InkLayer(this.meta.id, d.Wp / d.Hp, (page) => this.onInkChanged(page), () => this.onMarksChanged());
-    const myInk = this.ink;
-    this.ink.load().then(() => {
-      myInk.loaded = true;
-      if (this.ink !== myInk || !this.active) return;
-      this.refreshAllLeafTextures();
-      this.onMarksChanged();
-    });
+    this.ink = new InkLayer(this.meta.id, d.Wp / d.Hp, (page) => this.onInkChanged(page));
+    this.ink.load().then(() => this.refreshAllLeafTextures());
     this.computeTexHeight();
 
     const myEntry = entry;
@@ -239,7 +231,7 @@ export class Reader {
     this.active = false;
     this.phase = null;
     app.camera.zoom = 1;
-    app.shelf.syncMarkers(this.entry); // its ribbon and flags as you left them
+    app.shelf.syncMarkers(this.entry); // its flags as you left them
     app.onReaderClosed && app.onReaderClosed(this.entry);
     this.entry = null;
     app.invalidate();
@@ -445,51 +437,23 @@ export class Reader {
     return busy;
   }
 
-  // =============================================================== flags and the ribbon
+  // =============================================================== flags
   initMarkers() {
     this.flagMeshes = new Map();
     this.flags = [];
     this.syncFlags();
-    const hex = ribbonColor(this.meta.look);
-    this.ribbon = hex ? new Ribbon(hex, 24) : null;
-    if (this.ribbon) {
-      this.ribbon.mesh.visible = false;
-      this.model.group.add(this.ribbon.mesh);
-    }
-    this.ribbonKey = '';
     this.syncFinger();
-  }
-
-  /** A new ribbon colour (null: no ribbon) from the book's details. */
-  setRibbon(hex) {
-    if (!this.active) return;
-    if (this.ribbon && hex) this.ribbon.setColor(hex);
-    else if (this.ribbon && !hex) {
-      this.model.group.remove(this.ribbon.mesh);
-      this.ribbon.dispose();
-      this.ribbon = null;
-    } else if (!this.ribbon && hex) {
-      this.ribbon = new Ribbon(hex, 24);
-      this.model.group.add(this.ribbon.mesh);
-      this.ribbonKey = '';
-    }
-    this.app.invalidate();
   }
 
   disposeMarkers() {
     for (const m of this.flagMeshes.values()) if (m.parent) m.parent.remove(m);
     this.flagMeshes.clear();
     this.flags = [];
-    if (this.ribbon) {
-      if (this.ribbon.mesh.parent) this.ribbon.mesh.parent.remove(this.ribbon.mesh);
-      this.ribbon.dispose();
-    }
-    this.ribbon = null;
     this.finger = null;
     this.app.ui.setFinger(null);
   }
 
-  /** The flags follow the book's bookmarks and inked pages. */
+  /** The flags follow the book's bookmarks. */
   syncFlags() {
     const flags = flagsOf(this.meta);
     const keep = new Set(flags.map((f) => f.key + f.tone));
@@ -509,18 +473,6 @@ export class Reader {
     }
     this.flags = flags;
     this.app.invalidate();
-  }
-
-  /** The committed ink changed: which pages carry marks (and their colours) goes into the book's record. */
-  onMarksChanged() {
-    if (!this.ink || !this.ink.loaded) return; // not before the saved marks are in
-    const pages = inkPagesOf(this.ink.marks);
-    if (JSON.stringify(pages) !== JSON.stringify(this.meta.inkPages || [])) {
-      this.meta.inkPages = pages;
-      clearTimeout(this._metaT);
-      this._metaT = setTimeout(() => store.putBook(this.meta).catch(() => {}), 700);
-    }
-    this.syncFlags();
   }
 
   /** Where a flag stands on a leaf that is a sheet of its own (resting on top of a stack, or turning). */
@@ -594,114 +546,7 @@ export class Reader {
       flagMatrix(mesh.matrix, _P, _T, _U, _N, ud.lift, f.front ? 1 : -1);
       mesh.matrixWorldNeedsUpdate = true;
     }
-    this.updateRibbon(c);
     return busy;
-  }
-
-  /**
-   * The ribbon lies in the gutter of the open spread and hangs out at the tail — or, while you look elsewhere,
-   * comes out of the page block at the place it keeps, and hangs there.
-   */
-  updateRibbon(c) {
-    const r = this.ribbon;
-    if (!r) return;
-    const d = this.d;
-    const o = this.model.openness;
-    const show = o > 0.55;
-    r.mesh.visible = show;
-    if (!show) return;
-    const g = this.model.group;
-    g.updateWorldMatrix(true, false);
-    const mw = g.matrixWorld;
-    const f = this.finger ? this.finger.s : null;
-    const held = f != null && Math.abs(f - c) > 0.5;
-    const plank = this.app.shelf.plankUnder();
-    const e = mw.elements;
-    const key = `${held ? f : '-'}|${c.toFixed(3)}|${o.toFixed(3)}|${this.model.hL.toFixed(4)}|${e.map((v) => v.toFixed(3)).join(',')}|${plank ? plank.top.toFixed(3) + plank.style : ''}`;
-    if (key === this.ribbonKey) return;
-    this.ribbonKey = key;
-    const N = d.leaves;
-    let ex = 0.12;
-    let ez = 0.004;
-    let side = 1;
-    if (held) {
-      side = f > c ? 1 : -1;
-      const x = 1.7;
-      const frac = side > 0 ? clamp((N - f) / Math.max(N - c, 0.5), 0, 1) : clamp(f / Math.max(c, 0.5), 0, 1);
-      ez = layerAt(side > 0 ? this.model.hR : this.model.hL, o, d.Wp, frac, x).z + 0.004;
-      ex = side * x;
-    }
-    const y0 = -d.Hp / 2;
-    const yb = -d.Hc / 2;
-    const pts = [];
-    const sides = [];
-    const push = (x, y, z) => {
-      pts.push(new THREE.Vector3(x, y, z));
-      sides.push(_X.clone());
-    };
-    // out from between the pages (the part inside the book is never seen), over the board's edge…
-    push(ex, y0 + 0.25, ez * 0.6);
-    push(ex, y0 + 0.12, ez * 0.8);
-    push(ex, y0, ez);
-    push(ex, y0 - 0.1, ez * 0.4 + 0.006);
-    push(ex, y0 - 0.22, 0.008);
-    push(ex, yb + 0.03, 0.008);
-    push(ex, yb - 0.04, -0.07);
-    const n = r.n;
-    const rest = n - 6;
-    // …then, in the room: onto the shelf's plank the open book rests on, forward and over its edge — or, with
-    // no plank close below, straight down (short: it ends above the reader bar)
-    _m.copy(mw).invert();
-    const H0 = pts[6].clone().applyMatrix4(mw);
-    const toBook = (v) => v.applyMatrix4(_m);
-    const sideW = new THREE.Vector3(1, 0, 0);
-    const sideB = sideW.clone().transformDirection(_m);
-    // the open book may stand with its foot sunk behind the plank's front (the plank hides it): the ribbon then
-    // comes out where the book meets the plank's top
-    const S0 = H0.clone();
-    if (plank && H0.y < plank.top) {
-      const up = new THREE.Vector3(0, 1, 0).transformDirection(mw);
-      if (up.y > 0.2) S0.addScaledVector(up, (plank.top - H0.y) / up.y);
-    }
-    const onPlank = plank && S0.z < plank.front - 0.15 && H0.y > plank.top - 6 && H0.y < plank.top + 2.6;
-    if (onPlank && H0.y < plank.top) {
-      // its way through the book is inside the plank: fold it away to where it comes out
-      for (let i = 0; i <= 6; i++) pts[i] = toBook(new THREE.Vector3(S0.x, plank.top + 0.012, S0.z - 0.02 * (6 - i)));
-    }
-    if (onPlank) {
-      const top = plank.top + 0.012;
-      const fall = Math.max(0, S0.y - top);
-      const nFall = fall > 0.05 ? 3 : 0;
-      const nEdge = plank.drop > 0 ? 6 : 0;
-      const nLie = rest - nFall - nEdge;
-      const x = S0.x;
-      for (let i = 1; i <= nFall; i++) pts.push(toBook(new THREE.Vector3(x, S0.y - (fall * i) / nFall, S0.z + 0.04 * i)));
-      const z0 = S0.z + (nFall ? 0.12 : 0);
-      const zEnd = plank.front - (nEdge ? 0.1 : 0.5);
-      for (let i = 1; i <= nLie; i++) {
-        const t = i / nLie;
-        pts.push(toBook(new THREE.Vector3(x + side * 0.2 * Math.sin(t * 2.4), top, z0 + (zEnd - z0) * t)));
-      }
-      if (nEdge) {
-        const xe = x + side * 0.2 * Math.sin(2.4);
-        pts.push(toBook(new THREE.Vector3(xe, top - 0.035, plank.front + 0.035)));
-        pts.push(toBook(new THREE.Vector3(xe, top - 0.15, plank.front + 0.07)));
-        for (let i = 1; i <= 4; i++) pts.push(toBook(new THREE.Vector3(xe + side * 0.03 * i, top - 0.15 - ((plank.drop - 0.15) * i) / 4, plank.front + 0.075)));
-      }
-      for (let i = 7; i <= n; i++) sides.push(sideB.clone());
-    } else {
-      _g.set(0, -1, 0).transformDirection(_m);
-      const across = new THREE.Vector3().crossVectors(_g, _X);
-      const B0 = pts[6].clone();
-      const L = 1.55;
-      for (let i = 7; i <= n; i++) {
-        const t = (i - 6) / rest;
-        pts.push(B0.clone().addScaledVector(_g, t * L).addScaledVector(_X, side * 0.16 * Math.sin(t * 2.1)));
-        const tw = 0.35 * t * side;
-        sides.push(_X.clone().multiplyScalar(Math.cos(tw)).addScaledVector(across, Math.sin(tw)));
-      }
-    }
-    r.update(pts, sides);
   }
 
   /** A flag under a tap (never over a page: a tap on a page stays a tap on the page). */
@@ -731,31 +576,8 @@ export class Reader {
     return flagScreenBox(m.matrixWorld, this.app.camera, this.app.width, this.app.height);
   }
 
-  /** A tap on the hanging ribbon while it keeps your place elsewhere. */
-  ribbonHit(x, y) {
-    const r = this.ribbon;
-    if (!this.finger || !r || !r.mesh.visible || r.points.length < 8) return false;
-    const g = this.model.group;
-    g.updateWorldMatrix(true, false);
-    const pad = this.app.isTouch ? 22 : 12;
-    let prev = null;
-    for (let i = 4; i < r.points.length; i++) {
-      _w.copy(r.points[i]).applyMatrix4(g.matrixWorld).project(this.app.camera);
-      const p = { x: (_w.x * 0.5 + 0.5) * this.app.width, y: (-_w.y * 0.5 + 0.5) * this.app.height };
-      if (prev) {
-        const dx = p.x - prev.x;
-        const dy = p.y - prev.y;
-        const l2 = dx * dx + dy * dy || 1;
-        const t = clamp(((x - prev.x) * dx + (y - prev.y) * dy) / l2, 0, 1);
-        if (Math.hypot(x - prev.x - t * dx, y - prev.y - t * dy) < pad) return true;
-      }
-      prev = p;
-    }
-    return false;
-  }
-
   // =============================================================== keeping your place
-  /** Go somewhere on purpose (a flag, the contents, a page number): the ribbon stays where you were reading. */
+  /** Go somewhere on purpose (a flag, the contents, a page number): where you were reading is kept, to go back to. */
   jumpTo(s) {
     if (!this.canTurn()) return;
     this.finishFlights(true);
@@ -768,7 +590,7 @@ export class Reader {
     this.goToSpread(s);
   }
 
-  /** Back to the ribbon. */
+  /** Back to where you were reading. */
   returnToFinger() {
     const f = this.finger;
     if (!f || !this.canTurn()) return;
@@ -780,7 +602,6 @@ export class Reader {
 
   syncFinger() {
     this.app.ui.setFinger(this.finger ? Math.max(1, 2 * this.finger.s) : null);
-    this.ribbonKey = '';
     this.app.invalidate();
   }
 
@@ -1234,16 +1055,16 @@ export class Reader {
   onSpreadChanged() {
     if (this.finger && !this.fan) {
       if (this.s === this.finger.s) {
-        // back at the ribbon (page by page)
+        // back where you were (page by page)
         this.finger = null;
         this.jumpLanded = null;
         this.syncFinger();
       } else if (this.jumpLanded != null && Math.abs(this.s - this.jumpLanded) >= 3) {
-        // reading on from where you went: the ribbon comes along
+        // reading on from where you went: this is your place now
         this.finger = null;
         this.jumpLanded = null;
         this.syncFinger();
-        this.app.ui.toast('Reading on here · the ribbon moved along', 2200);
+        this.app.ui.toast('Reading on from here', 1800);
       }
     }
     this.prefetchSpread(this.s, 1);
@@ -1254,7 +1075,7 @@ export class Reader {
 
   saveSpread() {
     if (!this.meta || !this.active) return;
-    // your place is where the ribbon lies: a look elsewhere doesn't move it
+    // your place is where you were reading: a look elsewhere doesn't move it
     this.meta.spread = this.finger ? this.finger.s : this.s;
     this.meta.openedAt = Date.now();
     store.putBook(this.meta).catch(() => {});
@@ -1490,15 +1311,10 @@ export class Reader {
   }
 
   tap(x, y, type) {
-    // a flag first (its first tap only raises it, see App.flagTap), then the ribbon keeping your place
+    // a flag first (its first tap only raises it, see App.flagTap)
     const fl = this.pickFlag(x, y);
     if (fl) {
       this.app.flagTap({ entry: this.entry, flag: fl }, 'reader');
-      return;
-    }
-    if (this.ribbonHit(x, y)) {
-      this.app.clearPeek();
-      this.returnToFinger();
       return;
     }
     this.app.clearPeek();
@@ -1533,7 +1349,7 @@ export class Reader {
     this.parallax.tx = clamp((x / W) * 2 - 1, -1, 1);
     this.parallax.ty = clamp((y / H) * 2 - 1, -1, 1);
     const h = this.hover;
-    if (this.pickFlag(x, y) || this.ribbonHit(x, y)) {
+    if (this.pickFlag(x, y)) {
       h.target = 0;
       this.app.canvas.style.cursor = 'pointer';
       this.app.invalidate();

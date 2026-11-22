@@ -15,7 +15,6 @@ import { UI } from './ui.js';
 import { Magnifier } from './magnifier.js';
 import * as store from './store.js';
 import { importFiles, exportAnnotated, folderShelves, filesFromDrop } from './library.js';
-import { inkPagesOf, ribbonColor } from './markers.js';
 import { GROUPS, ORDERS, layout as arrangeLayout, sortBooks, loadShelves, saveShelves, reconcileShelves, newShelfId, seedManualOrder, orderBetween } from './arrange.js';
 import {
   makeGrainTexture,
@@ -44,6 +43,44 @@ function setPref(key, value) {
   } catch {}
 }
 
+/**
+ * A font face that failed to load (a hiccup while the offline cache was filling, say) stays failed for the
+ * whole visit, and the browser quietly draws with Georgia or the system mono instead. Load any such face again
+ * from its own @font-face rule before the first spine or title is drawn.
+ */
+async function retryFailedFonts() {
+  const failed = [...document.fonts].filter((f) => f.status === 'error');
+  if (!failed.length) return;
+  const rules = [];
+  for (const sheet of document.styleSheets) {
+    let list;
+    try {
+      list = sheet.cssRules;
+    } catch {
+      continue;
+    }
+    for (const r of list) if (r.type === CSSRule.FONT_FACE_RULE) rules.push(r);
+  }
+  const norm = (v) => String(v || '').replace(/['"]/g, '').trim().toLowerCase();
+  const jobs = [];
+  for (const f of failed) {
+    for (const r of rules) {
+      const st = r.style;
+      if (norm(st.getPropertyValue('font-family')) !== norm(f.family)) continue;
+      if (norm(st.getPropertyValue('font-weight') || '400') !== norm(f.weight)) continue;
+      if (norm(st.getPropertyValue('font-style') || 'normal') !== norm(f.style)) continue;
+      const m = /url\((['"]?)(.*?)\1\)/.exec(st.getPropertyValue('src'));
+      if (!m) continue;
+      const url = new URL(m[2], r.parentStyleSheet.href || location.href).href;
+      const range = st.getPropertyValue('unicode-range');
+      const face = new FontFace(f.family, `url(${url})`, { weight: f.weight, style: f.style, ...(range ? { unicodeRange: range } : {}) });
+      document.fonts.add(face);
+      jobs.push(face.load().catch(() => {}));
+    }
+  }
+  await Promise.all(jobs);
+}
+
 class App {
   constructor() {
     this.canvas = document.getElementById('stage');
@@ -53,7 +90,7 @@ class App {
     this.sort = ORDERS.some((o) => o.key === pref('sort', 'added')) ? pref('sort', 'added') : 'added';
     this.group = GROUPS.some((g) => g.key === pref('group', 'none')) ? pref('group', 'none') : 'none';
     this.reverse = pref('reverse', '0') === '1';
-    this.plank = pref('plank', 'oak');
+    this.plank = pref('plank', 'none');
     this.shelves = loadShelves();
     this.marks = new Map();
     this.theme = pref('theme', 'light');
@@ -73,6 +110,7 @@ class App {
       document.fonts.load('400 20px "IBM Plex Mono"'),
       document.fonts.load('500 20px "Inter"'),
     ]).catch(() => {});
+    await retryFailedFonts();
 
     this.initRenderer();
     this.initScene();
@@ -234,6 +272,15 @@ class App {
   // ================================================================= library
   async loadLibrary(selectId, { animate = false } = {}) {
     this.metas = await store.listBooks();
+    // books from before one type system for every spine were given a random style (serif, mono or sans): they
+    // take the house style once; a style picked later in Details stays
+    const retype = this.metas.filter((m) => m.look && (m.look.type || 0) < 2);
+    for (const m of retype) {
+      m.look = { ...m.look, spineStyle: 'serif', type: 2 };
+      // and the foils that stood apart from the rest (coral, mint) become gold
+      if (['#e58a6a', '#9fd0c0'].includes(m.look.accent)) m.look.accent = '#d9ab5f';
+    }
+    if (retype.length) store.putBooks(retype).catch((e) => console.warn('retype', e));
     this.marks = await store.countMarks().catch(() => new Map());
     if (reconcileShelves(this.shelves, this.metas)) saveShelves(this.shelves);
     if (!selectId) {
@@ -244,33 +291,12 @@ class App {
     this.ui.setCount(this.metas.length);
     if (!this.metas.length) this.ui.setNow(null);
     this.invalidate();
-    this.fillInkPages();
-  }
-
-  /** Books annotated before flags existed: note which of their pages carry ink (once, in the background). */
-  async fillInkPages() {
-    if (this.fillingInk) return;
-    this.fillingInk = true;
-    try {
-      for (const m of this.metas) {
-        if (m.inkPages || !(this.marks.get(m.id) > 0)) continue;
-        if (this.reader.isOpen && this.reader.meta === m) continue;
-        m.inkPages = inkPagesOf(await store.getMarks(m.id));
-        await store.putBook(m);
-        const e = this.shelf.all.get(m.id);
-        if (e) this.shelf.syncMarkers(e);
-      }
-    } catch (err) {
-      console.warn('flags', err);
-    } finally {
-      this.fillingInk = false;
-    }
   }
 
   // ---------------------------------------------------------------- flags
   /**
    * A tap on a flag. The first only raises it and shows where it leads, so a stray tap never takes you away;
-   * tapping it again (or its label) goes there, the ribbon keeping your place.
+   * tapping it again (or its label) goes there, keeping your place to go back to.
    */
   flagTap(hit, where) {
     const pk = this.peek;
@@ -521,7 +547,7 @@ class App {
       this.reader.close();
       return;
     }
-    // opened at a page: the ribbon stays where you were reading
+    // opened at a page: where you were reading is kept to go back to
     this.pending = { id, at: page ? clamp(Math.floor(page / 2), 0, Math.ceil(meta.pages / 2)) : null };
     this.selectBook(id);
   }
@@ -568,13 +594,6 @@ class App {
     meta.look = look;
     const e = this.shelf.all.get(meta.id);
     if (e) e.look = look;
-    if (this.reader.isOpen && this.reader.meta === meta) this.reader.setRibbon(ribbonColor(look));
-    if (Object.keys(patch).every((k) => k === 'ribbon')) {
-      // only the ribbon: no need to print the book again
-      store.putBook(meta).catch(() => {});
-      if (e) this.shelf.syncMarkers(e);
-      return;
-    }
     this.updateMeta(meta, { retexture: true });
     if (this.theme === 'color') this.ui.setTheme('color', look);
   }
@@ -878,6 +897,7 @@ class App {
     else {
       this.ui.toggleLightPop(false);
       this.ui.toggleArrangePop(false);
+      this.ui.toggleAddMenu(false);
     }
     if (this.magnifier.enabled && this.reader.isOpen && e.pointerType === 'touch' && !this.reader.tool) {
       this.lens = { id: e.pointerId };
@@ -1057,6 +1077,10 @@ class App {
   onKey(e) {
     const tag = (e.target && e.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (e.key === 'Escape' && !document.getElementById('add-menu').hidden) {
+      this.ui.toggleAddMenu(false);
+      return;
+    }
     if (e.key === 'Escape' && this.peek) {
       this.clearPeek();
       return;

@@ -130,7 +130,7 @@ export function makeStroke(tool, settings = inkSettings) {
 const OVERLAY_W = 1024;
 
 export class InkLayer {
-  constructor(bookId, pageAspect, onTexture, onMarks = null) {
+  constructor(bookId, pageAspect, onTexture) {
     this.bookId = bookId;
     this.aspect = pageAspect; // width / height of the page box
     this.marks = new Map(); // page → strokes[]
@@ -139,7 +139,6 @@ export class InkLayer {
     this.live = null; // { page, stroke, kind, sens, k, su, sv, sp, ru, rv, rp }
     this.saveTimers = new Map();
     this.onTexture = onTexture; // (page) => void — tell the reader a texture appeared / changed
-    this.onMarks = onMarks; // (page) => void — the committed marks of a page changed
   }
 
   async load() {
@@ -214,7 +213,6 @@ export class InkLayer {
       if (strokes) l.baseDirty = true;
     }
     this.onTexture && this.onTexture(page);
-    if (strokes && this.onMarks) this.onMarks(page);
   }
 
   // -------------------------------------------------------------- drawing

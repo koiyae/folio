@@ -93,16 +93,17 @@ export function chooseLook(id, title, analysis) {
     cloth = CLOTHS[Math.floor(hash01(title || id, 7) * CLOTHS.length)];
   }
   const dark = luminance(cloth) < 0.3;
-  const foils = dark ? ['#d9ab5f', '#e2c48a', '#f0ece2', '#e58a6a', '#9fd0c0'] : ['#1d1b19', '#7a1f2b', '#1f3b7a', '#1d1b19'];
+  // stamped foils: gold, pale gold or ivory on dark cloth (the same family on every book), ink colours on light
+  const foils = dark ? ['#d9ab5f', '#e2c48a', '#f0ece2'] : ['#1d1b19', '#7a1f2b', '#1f3b7a', '#1d1b19'];
   const accent = foils[Math.floor(r() * foils.length)];
   const ink = dark ? '#efebe2' : '#1f1d1a';
-  const styles = ['serif', 'serif', 'mono', 'sans'];
   const motifs = ['rings', 'grid', 'waves', 'stack', 'orbit'];
   return {
     cloth,
     ink,
     accent,
-    spineStyle: styles[Math.floor(r() * styles.length)],
+    spineStyle: 'serif', // every book in the same type (see makeSpineCanvas); Details offers mono and sans
+    type: 2,
     motif: motifs[Math.floor(r() * motifs.length)],
     coverMode: analysis && analysis.designed ? 'image' : 'cloth',
     material: defaultBinding(),
@@ -712,7 +713,15 @@ function drawMark(ctx, cx, cy, size, color) {
 }
 
 // ---------------------------------------------------------------- spine
-/** Spine lettering. `mask`: draw only what is stamped, white on black (see stampedTexture). */
+/**
+ * Spine lettering, in one type system for every book (the app's own): the author in small IBM Plex Mono capitals
+ * at the head, the title in Instrument Serif in the middle of the run, the library mark at the tail. Sizes come
+ * from the spine's height, which is about the same on every book, not from its thickness, so titles stand at one
+ * size along the shelf; only a spine too thin to hold them sets them smaller. A long title steps down once (one
+ * line, then two on a spine thick enough), and is cut short only after that. The Details panel's other spine
+ * styles (mono, sans) change the title's face only.
+ * `mask`: draw only what is stamped, white on black (see stampedTexture).
+ */
 export function makeSpineCanvas(meta, look, spineWorldW, spineWorldH, mask = false) {
   const H = 1024;
   const W = Math.max(72, Math.round((H * spineWorldW) / spineWorldH));
@@ -721,15 +730,16 @@ export function makeSpineCanvas(meta, look, spineWorldW, spineWorldH, mask = fal
   ctx.fillStyle = mask ? '#000' : look.cloth;
   ctx.fillRect(0, 0, W, H);
 
-  const inkCol = mask ? '#fff' : look.ink;
-  const titleCol = mask ? '#fff' : look.spineStyle === 'serif' && luminance(look.cloth) < 0.3 ? look.accent : inkCol;
+  // one foil for all of it: gold (or the binding's accent) on dark cloth, ink on light
+  const col = mask ? '#fff' : luminance(look.cloth) < 0.3 ? look.accent : look.ink;
   const markSize = Math.min(W * 0.42, 44);
   const markY = H - markSize * 1.6;
-  drawMark(ctx, W / 2, markY, markSize, titleCol);
+  drawMark(ctx, W / 2, markY, markSize, col);
 
   const title = (meta.title || 'Untitled').trim();
   const author = (meta.author || '').trim();
-  const style = look.spineStyle;
+  const style = look.spineStyle === 'mono' || look.spineStyle === 'sans' ? look.spineStyle : 'serif';
+  const across = W * 0.74; // room across the spine for type
 
   ctx.save();
   ctx.translate(W / 2, 0);
@@ -737,84 +747,57 @@ export function makeSpineCanvas(meta, look, spineWorldW, spineWorldH, mask = fal
   // rotated space: x runs down the spine (0 → H), y runs across (−W/2 … W/2), letter tops face +canvas-x
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
-  const top = H * 0.055;
+  ctx.fillStyle = col;
   const bottom = markY - markSize * 1.1;
-  let cursor = top;
+  let cursor = H * 0.055;
 
-  // author
+  // author: small mono capitals, tracked like the app's labels
   if (author) {
-    const aSize = Math.min(W * 0.2, 24);
-    let spacing = 0;
-    if (style === 'mono') {
-      ctx.font = `400 ${aSize * 0.92}px ${FONTS.mono}`;
-      spacing = aSize * 0.06;
-    } else if (style === 'sans') {
-      ctx.font = `500 ${aSize * 0.9}px ${FONTS.sans}`;
-      spacing = aSize * 0.04;
-    } else ctx.font = `italic 400 ${aSize * 1.08}px ${FONTS.serif}`;
-    ctx.fillStyle = inkCol;
-    const txt = ellipsize(ctx, style === 'serif' ? author : author.toUpperCase(), H * 0.26, spacing);
+    const aSize = Math.min(H * 0.0185, across * 0.36);
+    ctx.font = `400 ${aSize}px ${FONTS.mono}`;
+    const spacing = aSize * 0.08;
+    const txt = ellipsize(ctx, author.toUpperCase(), H * 0.3, spacing);
     drawSpaced(ctx, txt, cursor, 0, spacing);
-    cursor += spacedWidth(ctx, txt, spacing) + H * 0.05;
+    cursor += spacedWidth(ctx, txt, spacing) + H * 0.045;
   }
 
   // title
   const avail = bottom - cursor;
-  const maxSize = W * (style === 'sans' ? 0.42 : 0.5);
-  let size = maxSize;
+  const base = Math.min(H * 0.046, across);
   let spacing = 0;
   const setFont = (sz) => {
     if (style === 'mono') {
-      ctx.font = `400 ${sz * 0.82}px ${FONTS.mono}`;
-      spacing = sz * 0.08;
+      ctx.font = `400 ${sz * 0.74}px ${FONTS.mono}`;
+      spacing = sz * 0.05;
     } else if (style === 'sans') {
-      ctx.font = `500 ${sz * 0.9}px ${FONTS.sans}`;
-      spacing = sz * 0.06;
+      ctx.font = `500 ${sz * 0.76}px ${FONTS.sans}`;
+      spacing = sz * 0.04;
     } else {
       ctx.font = `400 ${sz}px ${FONTS.serif}`;
       spacing = 0;
     }
   };
   const tText = style === 'serif' ? title : title.toUpperCase();
-  setFont(size);
-  let w = spacedWidth(ctx, tText, spacing);
-  if (w > avail) {
-    size = Math.max(W * 0.22, size * (avail / w));
-    setFont(size);
-    w = spacedWidth(ctx, tText, spacing);
-  }
-  ctx.fillStyle = titleCol;
-  if (w <= avail) {
-    // centre the title in the remaining run
-    const x0 = cursor + (avail - w) / 2;
-    drawSpaced(ctx, tText, x0, 0, spacing);
-  } else {
-    // two lines, or ellipsis on very thin spines
-    const twoLines = W > 90 && /\s/.test(tText);
-    if (twoLines) {
-      const sz2 = Math.min(maxSize * 0.62, W * 0.3);
-      setFont(sz2);
+  const centred = (t, y) => drawSpaced(ctx, t, cursor + (avail - spacedWidth(ctx, t, spacing)) / 2, y, spacing);
+  setFont(base);
+  if (spacedWidth(ctx, tText, spacing) <= avail) centred(tText, 0);
+  else {
+    const small = base * 0.8;
+    setFont(small);
+    const lh = small * 1.06;
+    if (spacedWidth(ctx, tText, spacing) <= avail) centred(tText, 0);
+    else if (across >= lh * 2 && /\s/.test(tText)) {
+      // two lines, split where they come out most even
       const words = tText.split(/\s+/);
       let best = 1;
       let bestDiff = Infinity;
       for (let i = 1; i < words.length; i++) {
-        const a = words.slice(0, i).join(' ');
-        const b = words.slice(i).join(' ');
-        const d = Math.abs(spacedWidth(ctx, a, spacing) - spacedWidth(ctx, b, spacing));
-        if (d < bestDiff) {
-          bestDiff = d;
-          best = i;
-        }
+        const d = Math.abs(spacedWidth(ctx, words.slice(0, i).join(' '), spacing) - spacedWidth(ctx, words.slice(i).join(' '), spacing));
+        if (d < bestDiff) [best, bestDiff] = [i, d];
       }
-      const l1 = ellipsize(ctx, words.slice(0, best).join(' '), avail, spacing);
-      const l2 = ellipsize(ctx, words.slice(best).join(' '), avail, spacing);
-      const lh = sz2 * 1.05;
-      drawSpaced(ctx, l1, cursor + (avail - spacedWidth(ctx, l1, spacing)) / 2, -lh / 2, spacing);
-      drawSpaced(ctx, l2, cursor + (avail - spacedWidth(ctx, l2, spacing)) / 2, lh / 2, spacing);
-    } else {
-      const t = ellipsize(ctx, tText, avail, spacing);
-      drawSpaced(ctx, t, cursor + (avail - spacedWidth(ctx, t, spacing)) / 2, 0, spacing);
-    }
+      centred(ellipsize(ctx, words.slice(0, best).join(' '), avail, spacing), -lh / 2);
+      centred(ellipsize(ctx, words.slice(best).join(' '), avail, spacing), lh / 2);
+    } else centred(ellipsize(ctx, tText, avail, spacing), 0);
   }
   ctx.restore();
   return c;
@@ -900,7 +883,11 @@ function drawMotif(ctx, look, W, H, seed) {
   ctx.restore();
 }
 
-/** A typeset cloth cover for PDFs whose first page is not a designed cover. */
+/**
+ * A typeset cloth cover for PDFs whose first page is not a designed cover, in the spine's type system: the title
+ * in Instrument Serif at one size for every book (long titles step down once), a short rule, the ornament, and
+ * the author in small IBM Plex Mono capitals at the foot.
+ */
 export function makeClothCoverCanvas(meta, look, aspect /* W/H of the board */, mask = false) {
   const W = 768;
   const H = Math.round(W / aspect);
@@ -912,42 +899,47 @@ export function makeClothCoverCanvas(meta, look, aspect /* W/H of the board */, 
   const title = (meta.title || 'Untitled').trim();
   const author = (meta.author || '').trim();
   const m = W * 0.1;
-  const titleCol = mask ? '#fff' : luminance(look.cloth) < 0.3 ? look.accent : look.ink;
+  const col = mask ? '#fff' : luminance(look.cloth) < 0.3 ? look.accent : look.ink;
 
   // title block, top-left
-  ctx.fillStyle = titleCol;
+  ctx.fillStyle = col;
   ctx.textBaseline = 'alphabetic';
-  let size = W * 0.074;
+  ctx.textAlign = 'left';
+  let size = W * 0.08;
   ctx.font = `400 ${size}px ${FONTS.serif}`;
-  let lines = wrapLines(ctx, title, W * 0.56);
-  while (lines.length > 5 && size > W * 0.045) {
-    size *= 0.9;
+  let lines = wrapLines(ctx, title, W * 0.62);
+  if (lines.length > 4) {
+    size = W * 0.064;
     ctx.font = `400 ${size}px ${FONTS.serif}`;
-    lines = wrapLines(ctx, title, W * 0.6);
+    lines = wrapLines(ctx, title, W * 0.68);
   }
-  lines = lines.slice(0, 6);
-  let y = m + size;
+  if (lines.length > 6) {
+    lines = lines.slice(0, 6);
+    lines[5] = ellipsize(ctx, lines[5] + ' …', W * 0.68);
+  }
+  let y = m + size * 0.9;
   for (const l of lines) {
     ctx.fillText(l, m, y);
-    y += size * 1.02;
+    y += size * 1.04;
   }
-  ctx.fillRect(m, y - size * 0.45, W * 0.07, Math.max(2, W * 0.003));
+  ctx.fillRect(m, y - size * 0.42, W * 0.07, Math.max(2, W * 0.003));
 
   drawMotif(ctx, look, W, H, hash01(title, 11));
 
-  // author, bottom-left
+  // author, bottom-left: the spine's small capitals
   if (author) {
-    ctx.fillStyle = titleCol;
-    ctx.font = `italic 400 ${W * 0.05}px ${FONTS.serif}`;
-    const al = wrapLines(ctx, author, W * 0.6).slice(0, 2);
-    let ay = H - m - (al.length - 1) * W * 0.055;
+    const aSize = W * 0.03;
+    const spacing = aSize * 0.08;
+    ctx.font = `400 ${aSize}px ${FONTS.mono}`;
+    const al = wrapLines(ctx, author.toUpperCase(), W * 0.6).slice(0, 2);
+    let ay = H - m - (al.length - 1) * aSize * 1.5;
     for (const l of al) {
-      ctx.fillText(l, m, ay);
-      ay += W * 0.055;
+      drawSpaced(ctx, l, m, ay, spacing);
+      ay += aSize * 1.5;
     }
   }
   // corner mark
-  drawMark(ctx, W - m * 0.95, m * 0.95, W * 0.07, titleCol);
+  drawMark(ctx, W - m * 0.95, m * 0.95, W * 0.07, col);
   return c;
 }
 

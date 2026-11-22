@@ -7,7 +7,6 @@ import { BINDINGS, bindingKind } from './binding.js';
 import { LIGHTS } from './lighting.js';
 import { GROUPS, ORDERS, sectionsOf } from './arrange.js';
 import { PLANK_STYLES } from './shelfdeco.js';
-import { RIBBONS } from './markers.js';
 import { inkSettings, PEN_COLORS, MARKER_COLORS, RANGES, TOOL_KIND, makeStroke, drawStroke, pressureFactor } from './ink.js';
 
 const $ = (id) => document.getElementById(id);
@@ -40,22 +39,25 @@ export class UI {
   // ------------------------------------------------------------------ wiring
   bind() {
     const app = this.app;
-    $('add-btn').addEventListener('click', () => app.pickFiles());
+    // one add button: PDF files, or a folder (which becomes a shelf)
+    $('add-btn').addEventListener('click', () => this.toggleAddMenu());
+    $('add-files').addEventListener('click', () => {
+      this.toggleAddMenu(false);
+      app.pickFiles();
+    });
+    $('add-folder-btn').addEventListener('click', () => {
+      this.toggleAddMenu(false);
+      app.pickFolder();
+    });
     $('empty-add').addEventListener('click', () => app.pickFiles());
-    $('add-folder-btn').addEventListener('click', () => app.pickFolder());
     $('empty-folder').addEventListener('click', () => app.pickFolder());
     $('brand').addEventListener('click', () => {
       if (app.reader.isOpen) app.reader.close();
       this.closePanel();
     });
-    $('esc-hint').addEventListener('click', () => app.reader.close());
     $('theme-btn').addEventListener('click', () => app.cycleTheme());
     $('sort-btn').addEventListener('click', () => this.toggleArrangePop());
     this.initArrangePop();
-    $('open-btn').addEventListener('click', () => {
-      if (app.reader.isOpen) app.reader.close();
-      else app.openSelected();
-    });
     $('details-btn').addEventListener('click', () => {
       if (this.panelMode === 'details') this.closePanel();
       else this.openDetails(app.currentMeta());
@@ -126,7 +128,7 @@ export class UI {
 
   // ------------------------------------------------------------------ metrics for the reading layout
   readTop() {
-    const m = this.marquee.getBoundingClientRect();
+    const m = this.track.getBoundingClientRect();
     return Math.max(70, m.top + m.height * 0.42);
   }
   readBottom() {
@@ -134,14 +136,17 @@ export class UI {
     return Math.max(80, window.innerHeight - bar.top + 10);
   }
 
-  // ------------------------------------------------------------------ marquee
+  // ------------------------------------------------------------------ the title row
+  // Every title of the shelf in a row that glides with it, the selected one upright and dark, the others
+  // italic and grey. While a book is open the row steps back (CSS, body[data-mode='reading']): the neighbours
+  // part and fade, the open book's title shrinks up into the line above the book, like a running head.
   setTitles(metas) {
     this.track.textContent = '';
     this.titles = metas.map((m) => {
       const el = document.createElement('span');
       el.className = 't';
       const pages = m.pages ? `${m.pages} pp` : '';
-      el.innerHTML = `${esc(m.title)}<sup>(${esc(pages)})</sup>`;
+      el.innerHTML = `<span class="ti">${esc(m.title)}<sup>(${esc(pages)})</sup></span>`;
       this.track.appendChild(el);
       return { el, w: [0, 0], x: 0 };
     });
@@ -157,7 +162,6 @@ export class UI {
       t.w[1] = t.el.offsetWidth;
       t.el.classList.remove('on');
     }
-    this.gap = parseFloat(getComputedStyle(this.marquee).getPropertyValue('--title-size')) || 48;
     this.gap = Math.max(24, (this.titles[0] ? this.titles[0].el.offsetHeight : 60) * 0.42);
     this.lastP = null;
   }
@@ -172,6 +176,9 @@ export class UI {
     this.titles.forEach((t, i) => {
       const on = i === sel;
       t.el.classList.toggle('on', on);
+      // which side of the selected title it stands on (they part that way when a book opens)
+      t.el.classList.toggle('l', i < sel);
+      t.el.classList.toggle('r', i > sel);
       const w = t.w[on ? 1 : 0];
       t.x = x;
       t.el.style.transform = `translateX(${x}px)`;
@@ -187,14 +194,12 @@ export class UI {
   }
 
   // ------------------------------------------------------------------ footer, counts, empty
-  setNow(meta) {
-    $('now-title').textContent = meta ? meta.title.toUpperCase() : 'FOLIO';
-  }
+  /** (The selected book's title lives in the title row alone; kept for callers.) */
+  setNow() {}
 
   setCount(n) {
     $('count').textContent = `[ ${n} ${n === 1 ? 'BOOK' : 'BOOKS'} ]`;
     $('empty').hidden = n > 0;
-    $('open-btn').disabled = n === 0;
     $('details-btn').disabled = n === 0;
   }
 
@@ -220,7 +225,7 @@ export class UI {
 
   setReading(on) {
     this.body.dataset.mode = on ? 'reading' : 'shelf';
-    $('open-btn').textContent = on ? 'CLOSE BOOK [-]' : 'OPEN BOOK [+]';
+    this.toggleAddMenu(false);
     $('readerbar').hidden = !on;
     if (!on) this.closePopovers();
   }
@@ -230,7 +235,6 @@ export class UI {
   updateReaderBar(s) {
     $('rb-left').textContent = s.left ?? '—';
     $('rb-right').textContent = s.right ?? '—';
-    $('rb-mark').classList.toggle('on', s.bookmarked);
     $('rb-bookmark').setAttribute('aria-pressed', String(s.bookmarked));
     $('rb-prev').disabled = !s.canPrev;
     $('rb-next').disabled = !s.canNext;
@@ -246,21 +250,21 @@ export class UI {
     if (!$('goto').hidden) this.syncGoto();
   }
 
-  /** The ribbon keeps page `page` while you look elsewhere (null: it lies where you are). */
+  /** After a jump: page `page` is where you were reading, to go back to (null: you are there). */
   setFinger(page) {
     const b = $('rb-back');
     b.hidden = page == null;
     if (page != null) {
       $('rb-back-p').textContent = page;
-      b.setAttribute('aria-label', `Back to page ${page}, where the ribbon is`);
-      b.title = 'Back to the ribbon (R)';
+      b.setAttribute('aria-label', `Back to page ${page}, where you were reading`);
+      b.title = 'Back to where you were reading (R)';
     }
   }
 
   // ------------------------------------------------------------------ a raised flag's label
   showFlagTip(flag, go) {
     const t = $('flag-tip');
-    t.querySelector('.ft-p').textContent = `${flag.kind === 'bookmark' ? 'Flag' : 'Notes'} · p. ${flag.page}`;
+    t.querySelector('.ft-p').textContent = `Bookmark · p. ${flag.page}`;
     t.querySelector('.ft-h').textContent = this.app.reader.isOpen ? 'Tap again to go there' : 'Tap again to open here';
     t.setAttribute('aria-label', `Go to page ${flag.page}`);
     this.flagTipGo = go;
@@ -456,7 +460,19 @@ export class UI {
     }
   }
 
+  toggleAddMenu(force) {
+    const el = $('add-menu');
+    const show = force ?? el.hidden;
+    el.hidden = !show;
+    $('add-btn').setAttribute('aria-expanded', String(show));
+    if (show) {
+      this.toggleArrangePop(false);
+      this.toggleLightPop(false);
+    }
+  }
+
   closePopovers() {
+    if (!$('add-menu').hidden) this.toggleAddMenu(false);
     if (!$('goto').hidden) this.toggleGoto(false);
     if (!$('light-pop').hidden) this.toggleLightPop(false);
     if (!$('ink-pop').hidden) this.toggleInkPop(false);
@@ -514,6 +530,7 @@ export class UI {
     $('sort-btn').setAttribute('aria-expanded', String(show));
     if (show) {
       this.toggleLightPop(false);
+      this.toggleAddMenu(false);
       this.syncArrangePop();
     }
   }
@@ -954,6 +971,9 @@ export class UI {
     const outline = (reading && app.reader.outline) || meta.outline || [];
     const bookmarks = meta.bookmarks || [];
     const look = meta.look;
+    // two tabs: reading (where you are, contents, bookmarks, annotations) and the book itself (its name, shelf,
+    // binding, file); the last one chosen opens again
+    const tab = this.detailsTab || 'reading';
     const cloths = CLOTHS.map(
       (c) => `<button type="button" style="--c:${c}" data-cloth="${c}" aria-label="Cloth ${c}" aria-pressed="${look.cloth === c}"></button>`,
     ).join('');
@@ -965,8 +985,12 @@ export class UI {
         <h2>${esc(meta.title)}</h2>
         ${meta.author ? `<p class="byline">+ by ${esc(meta.author)} +</p>` : ''}
       </section>
+      <div class="tabs" role="tablist" aria-label="Details">
+        <button type="button" class="mono-btn" role="tab" data-tab="reading" aria-selected="${tab === 'reading'}">Reading</button>
+        <button type="button" class="mono-btn" role="tab" data-tab="book" aria-selected="${tab === 'book'}">Book</button>
+      </div>
+      <div class="tab-pane" data-pane="reading"${tab === 'reading' ? '' : ' hidden'}>
       <section>
-        <span class="k">[ Reading ]</span>
         <div class="facts"><span>Position</span><span>Page ${curPage} of ${meta.pages}</span><span>Last opened</span><span>${fmtDate(meta.openedAt)}</span></div>
         <div class="progress"><i style="width:${pct}%"></i></div>
         <div class="panel-actions"><button type="button" class="mono-btn" data-act="open">${reading ? '[ BACK TO THE PAGE ]' : spread ? '[ CONTINUE READING ]' : '[ OPEN BOOK ]'}</button></div>
@@ -981,10 +1005,12 @@ export class UI {
       }
       <section><span class="k">[ Bookmarks ]</span>${
         bookmarks.length
-          ? `<ul class="list">${bookmarks.map((s) => `<li><button type="button" data-spread="${s}"><span>Spread ${Math.max(1, s * 2)}–${s * 2 + 1}</span><span class="pg">p. ${Math.max(1, s * 2)}</span></button></li>`).join('')}</ul>`
-          : '<p class="note">Flag a spread with the flag in the reader bar (or B). Flags stick out of the top of the book: tap one twice to go there.</p>'
+          ? `<ul class="list">${bookmarks.map((s) => `<li><button type="button" data-spread="${s}"><span>Pages ${Math.max(1, s * 2)}–${Math.min(meta.pages, s * 2 + 1)}</span></button></li>`).join('')}</ul>`
+          : '<p class="note">Bookmark a spread with the flag in the reader bar (or B). Its flag sticks out of the top of the book: tap it twice to go there.</p>'
       }</section>
       <section id="marks-sec"><span class="k">[ Annotations ]</span><p class="note">Counting…</p></section>
+      </div>
+      <div class="tab-pane" data-pane="book"${tab === 'book' ? '' : ' hidden'}>
       <section>
         <span class="k">[ Title + Author ]</span>
         <input class="field" id="f-title" value="${esc(meta.title)}" aria-label="Title" autocomplete="off">
@@ -998,8 +1024,9 @@ export class UI {
           <option value="__new">New shelf…</option>
         </select>
         <div class="new-shelf-row" id="f-new-shelf-row" hidden><input class="field" id="f-new-shelf-name" placeholder="Name of the new shelf" autocomplete="off"><button type="button" class="mono-btn" data-act="new-shelf">[ CREATE ]</button></div>
-        <div id="f-section-row"${meta.shelf ? '' : ' hidden'}>
-          <input class="field" id="f-section" value="${esc(meta.section || '')}" placeholder="Section on the shelf (none)" aria-label="Section" autocomplete="off" list="f-sections">
+        <div id="f-section-row" class="f-labelled"${meta.shelf ? '' : ' hidden'}>
+          <span class="mono dim">Section</span>
+          <input class="field" id="f-section" value="${esc(meta.section || '')}" placeholder="None" aria-label="Section" autocomplete="off" list="f-sections">
           <datalist id="f-sections">${sectionsOf(app.metas, meta.shelf).map((x) => `<option value="${esc(x)}">`).join('')}</datalist>
         </div>
       </section>
@@ -1008,7 +1035,7 @@ export class UI {
         <div class="cloths">${cloths}</div>
         <div class="seg"><span class="mono dim">Material</span>
           ${Object.entries(BINDINGS).map(([k, b]) => `<button type="button" class="mono-btn" data-material="${k}" aria-pressed="${bindingKind(look) === k}">${b.label}</button>`).join('')}
-          <button type="button" class="mono-btn dim" data-act="material-all">[ Use for all books ]</button>
+          <button type="button" class="mono-btn dim" data-act="material-all">Use for all books</button>
         </div>
         <div class="seg"><span class="mono dim">Cover</span>
           <button type="button" class="mono-btn" data-cover="image" aria-pressed="${look.coverMode === 'image'}">PDF page 1</button>
@@ -1016,11 +1043,6 @@ export class UI {
         </div>
         <div class="seg"><span class="mono dim">Spine</span>
           ${['serif', 'mono', 'sans'].map((s) => `<button type="button" class="mono-btn" data-spine="${s}" aria-pressed="${look.spineStyle === s}">${s}</button>`).join('')}
-        </div>
-        <div class="seg ribbon-seg"><span class="mono dim">Ribbon</span>
-          <span class="cloths ribbons">${RIBBONS.map((r) => `<button type="button" style="--c:${r.hex}" data-ribbon="${r.hex}" aria-label="${r.name} ribbon" aria-pressed="${look.ribbon === r.hex}"></button>`).join('')}</span>
-          <button type="button" class="mono-btn" data-ribbon="auto" aria-pressed="${!look.ribbon || look.ribbon === 'auto'}">Matching</button>
-          <button type="button" class="mono-btn" data-ribbon="none" aria-pressed="${look.ribbon === 'none'}">None</button>
         </div>
       </section>
       <section>
@@ -1038,10 +1060,18 @@ export class UI {
         <button type="button" class="mono-btn danger" data-act="remove">[ REMOVE FROM LIBRARY ]</button>
         <div id="confirm-remove" hidden><p class="note">Remove “${esc(meta.title)}”, its notes and bookmarks from this device?</p>
           <div class="seg"><button type="button" class="mono-btn danger" data-act="remove-yes">[ YES, REMOVE ]</button><button type="button" class="mono-btn" data-act="remove-no">[ KEEP IT ]</button></div></div>
-      </section>`,
+      </section>
+      </div>`,
     );
 
     const body = this.panelBody;
+    body.querySelectorAll('[data-tab]').forEach((b) =>
+      b.addEventListener('click', () => {
+        this.detailsTab = b.dataset.tab;
+        body.querySelectorAll('[data-tab]').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
+        body.querySelectorAll('[data-pane]').forEach((x) => (x.hidden = x.dataset.pane !== b.dataset.tab));
+      }),
+    );
     body.querySelector('[data-act="open"]').addEventListener('click', () => {
       this.closePanel();
       if (!reading) app.openBookById(meta.id);
@@ -1105,12 +1135,6 @@ export class UI {
       b.addEventListener('click', () => {
         app.setLook(meta, { spineStyle: b.dataset.spine });
         body.querySelectorAll('[data-spine]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
-      }),
-    );
-    body.querySelectorAll('[data-ribbon]').forEach((b) =>
-      b.addEventListener('click', () => {
-        app.setLook(meta, { ribbon: b.dataset.ribbon });
-        body.querySelectorAll('[data-ribbon]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
       }),
     );
     const shelfSel = body.querySelector('#f-shelf');

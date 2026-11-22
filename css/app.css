@@ -219,26 +219,58 @@ input:focus-visible {
   height: 30px;
   position: relative;
 }
-.esc-hint {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+/* arranging the shelf means nothing while a book is open */
+#sort-btn {
+  transition: opacity 0.3s ease;
+}
+body[data-mode='reading'] #sort-btn {
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.4s ease;
 }
-body[data-mode='reading'] .esc-hint {
-  opacity: 1;
-  pointer-events: auto;
+
+/* one add button: PDF files or a folder */
+.add-wrap {
+  position: relative;
+}
+#add-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 250px;
+  padding: 10px 16px 8px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+#add-menu[hidden] {
+  display: none;
+}
+#add-menu .mono-btn {
+  padding: 8px 0;
+}
+#add-menu .note {
+  font-family: var(--sans);
+  font-size: 12.5px;
+  letter-spacing: 0;
+  line-height: 1.4;
+  color: var(--muted);
+  margin: 6px 0 2px;
 }
 
 /* ---------------------------------------------------------------- title marquee */
 #marquee {
+  --lift: 42px; /* the box reaches up into the line under the header, where an open book's title goes */
+  --head: 19px; /* from the titles' line up to the middle of that line */
   position: fixed;
   left: 0;
   right: 0;
-  top: calc(var(--safe-t) + 78px);
-  height: calc(var(--title-size) * 1.25);
+  top: calc(var(--safe-t) + 78px - var(--lift));
+  height: calc(var(--title-size) * 1.25 + var(--lift));
   overflow: hidden;
   pointer-events: none;
   z-index: 0;
@@ -248,8 +280,8 @@ body[data-mode='reading'] .esc-hint {
 #marquee .track {
   position: absolute;
   left: 0;
-  top: 0;
-  height: 100%;
+  top: var(--lift);
+  height: calc(var(--title-size) * 1.25);
   white-space: nowrap;
   will-change: transform;
 }
@@ -268,6 +300,33 @@ body[data-mode='reading'] .esc-hint {
 #marquee .t.on {
   color: var(--fg);
   font-style: normal;
+}
+/* While a book opens, the row steps back: the neighbours part and fade as the book rises between them, and the
+   open book's title shrinks up into the line above it, quiet, like a running head. Closing plays it back, the
+   neighbours returning a moment after the title has started to grow. */
+#marquee .ti {
+  display: inline-block;
+  transform-origin: 50% 0;
+  transition: opacity 0.5s ease 0.28s, transform 0.9s cubic-bezier(0.22, 0.8, 0.2, 1) 0.2s;
+}
+#marquee .t.on .ti {
+  transition: opacity 0.6s ease, transform 0.9s cubic-bezier(0.22, 0.8, 0.2, 1);
+}
+body[data-mode='reading'] #marquee .t.l .ti,
+body[data-mode='reading'] #marquee .t.r .ti {
+  opacity: 0;
+  transition: opacity 0.42s ease, transform 0.75s cubic-bezier(0.4, 0, 0.6, 1);
+}
+body[data-mode='reading'] #marquee .t.l .ti {
+  transform: translateX(-9vw);
+}
+body[data-mode='reading'] #marquee .t.r .ti {
+  transform: translateX(9vw);
+}
+body[data-mode='reading'] #marquee .t.on .ti {
+  opacity: 0.72;
+  transform: translateY(calc(-1 * var(--head) - var(--title-size) * 0.2576)) scale(0.46);
+  transition: opacity 0.8s ease 0.15s, transform 1s cubic-bezier(0.5, 0, 0.2, 1) 0.1s;
 }
 #marquee .t sup {
   font-family: var(--serif);
@@ -417,9 +476,34 @@ body[data-mode='reading'] .esc-hint {
 #rb-bookmark[aria-pressed='true'] svg path:not(.pole) {
   fill: currentColor;
 }
-/* back to the ribbon (shown while it keeps your place elsewhere) */
+/* back to where you were reading (shown after a jump) */
 .rb.back[hidden] {
   display: none;
+}
+/* the two halves of a book's details */
+.panel-body .tabs {
+  display: flex;
+  gap: 22px;
+  border-top: 1px solid var(--soft);
+  border-bottom: 1px solid var(--soft);
+  margin: 0 0 2px;
+}
+.panel-body .tabs .mono-btn {
+  font-size: 11px;
+  padding: 12px 0 10px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1.5px solid transparent;
+}
+.panel-body .tabs [aria-selected='true'] {
+  color: var(--fg);
+  border-bottom-color: var(--fg);
+}
+.panel-body .tab-pane[hidden] {
+  display: none;
+}
+.panel-body .tab-pane > section:first-child {
+  border-top: 0;
 }
 .rb.back {
   letter-spacing: 0.03em;
@@ -485,13 +569,8 @@ body[data-mode='reading'] .esc-hint {
   letter-spacing: 0.03em;
   padding: 0 4px;
 }
-.readout .mark {
-  width: 9px;
-  height: 11px;
-  opacity: 0.55;
-}
-.readout .mark.on path {
-  fill: currentColor;
+.readout .sep {
+  opacity: 0.45;
 }
 .swatches {
   display: inline-flex;
@@ -707,6 +786,20 @@ body[data-mode='reading'] .esc-hint {
   gap: 12px;
   align-items: center;
   margin-top: 8px;
+}
+.new-shelf-row[hidden],
+.f-labelled[hidden] {
+  display: none;
+}
+.f-labelled {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.f-labelled > .mono.dim {
+  min-width: 66px;
+  font-size: 10.5px;
+  text-transform: uppercase;
 }
 .ap-field {
   flex: 1;
@@ -1188,7 +1281,8 @@ body[data-mode='reading'] #empty {
     gap: 12px;
   }
   #marquee {
-    top: calc(var(--safe-t) + 72px);
+    top: calc(var(--safe-t) + 72px - var(--lift));
+    --head: 13px;
   }
   .bottom .actions .mono-btn {
     font-size: 11px;
@@ -1210,22 +1304,4 @@ body[data-mode='reading'] #empty {
   * {
     transition-duration: 0.01s !important;
   }
-}
-
-/* ribbon colours in a book's details: narrow silk swatches */
-.ribbon-seg {
-  align-items: center;
-}
-.cloths.ribbons {
-  gap: 7px;
-}
-.cloths.ribbons button {
-  width: 12px;
-  height: 30px;
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 82%, 0 100%);
-}
-.cloths.ribbons button[aria-pressed='true'] {
-  outline: none;
-  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--fg);
-  clip-path: none;
 }
