@@ -261,6 +261,14 @@ body[data-mode='reading'] #sort-btn {
   color: var(--muted);
   margin: 6px 0 2px;
 }
+/* carrying the library is apart from adding books */
+#add-menu #lib-export {
+  align-self: stretch;
+  text-align: left;
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
 
 /* ---------------------------------------------------------------- title marquee */
 #marquee {

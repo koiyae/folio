@@ -49,6 +49,14 @@ export class UI {
       this.toggleAddMenu(false);
       app.pickFolder();
     });
+    $('lib-export').addEventListener('click', () => {
+      this.toggleAddMenu(false);
+      app.exportLibrary();
+    });
+    $('lib-import').addEventListener('click', () => {
+      this.toggleAddMenu(false);
+      app.pickLibrary();
+    });
     $('empty-add').addEventListener('click', () => app.pickFiles());
     $('empty-folder').addEventListener('click', () => app.pickFolder());
     $('brand').addEventListener('click', () => {

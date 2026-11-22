@@ -32,6 +32,9 @@
           <button type="button" class="mono-btn" role="menuitem" id="add-files">[ PDF FILES ]</button>
           <button type="button" class="mono-btn" role="menuitem" id="add-folder-btn">[ A FOLDER ]</button>
           <p class="note">A folder becomes one of your shelves, its subfolders its sections. You can also drop files or folders on the window.</p>
+          <button type="button" class="mono-btn" role="menuitem" id="lib-export">[ SAVE LIBRARY ]</button>
+          <button type="button" class="mono-btn" role="menuitem" id="lib-import">[ BRING IN A LIBRARY ]</button>
+          <p class="note">Your whole library in one .folio file (books, places, flags, marks, shelves), to open on another device.</p>
         </div>
       </div>
       <span class="mono dim" id="count">[ 0 BOOKS ]</span>
@@ -160,6 +163,7 @@
 <div id="drop" hidden><div>Drop PDFs to add them to the shelf</div></div>
 <input type="file" id="file-input" accept="application/pdf,.pdf" multiple hidden>
 <input type="file" id="folder-input" webkitdirectory multiple hidden>
+<input type="file" id="library-input" accept=".folio" hidden>
 
 <script type="module" src="js/main.js"></script>
 </body>

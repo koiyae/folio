@@ -115,6 +115,26 @@ export async function deleteBook(id) {
   });
 }
 
+/**
+ * Write a book from a library backup in one go: its record, its file and cover (null: keep what is stored),
+ * and, when `marks` is given ([{ page, strokes }]), those marks in place of the book's own.
+ */
+export async function restoreBook(meta, fileBlob, coverBlob, marks = null) {
+  const old = marks
+    ? await tx(['marks'], 'readonly', (t) => reqP(t.objectStore('marks').index('bookId').getAllKeys(IDBKeyRange.only(meta.id))))
+    : [];
+  return tx(['books', 'files', 'covers', 'marks'], 'readwrite', (t) => {
+    t.objectStore('books').put(meta);
+    if (fileBlob) t.objectStore('files').put({ id: meta.id, blob: fileBlob });
+    if (coverBlob) t.objectStore('covers').put({ id: meta.id, blob: coverBlob });
+    if (marks) {
+      const m = t.objectStore('marks');
+      for (const k of old) m.delete(k);
+      for (const r of marks) if (r.strokes && r.strokes.length) m.put({ key: `${meta.id}|${r.page}`, bookId: meta.id, page: r.page, strokes: r.strokes });
+    }
+  });
+}
+
 export async function getMarks(bookId) {
   const rows = await tx(['marks'], 'readonly', (t) =>
     reqP(t.objectStore('marks').index('bookId').getAll(IDBKeyRange.only(bookId))),

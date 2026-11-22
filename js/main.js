@@ -15,6 +15,7 @@ import { UI } from './ui.js';
 import { Magnifier } from './magnifier.js';
 import * as store from './store.js';
 import { importFiles, exportAnnotated, folderShelves, filesFromDrop } from './library.js';
+import { exportLibrary, importLibrary, backupName, BACKUP_EXT } from './backup.js';
 import { GROUPS, ORDERS, layout as arrangeLayout, sortBooks, loadShelves, saveShelves, reconcileShelves, newShelfId, seedManualOrder, orderBetween } from './arrange.js';
 import {
   makeGrainTexture,
@@ -655,6 +656,66 @@ class App {
     }
   }
 
+  /** The whole library (PDFs, covers, places, flags, marks, shelves) as one .folio file to download. */
+  async exportLibrary() {
+    if (!this.metas.length) return void this.ui.toast('The library is empty');
+    if (this.importing) return;
+    this.importing = true;
+    try {
+      const { blob, count, missing } = await exportLibrary(this.metas, this.shelves, (i, n, title) => this.ui.toast(`Packing ${i + 1} of ${n} — ${title}`, 60000));
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = backupName();
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      this.ui.toast(`Library saved: ${count} ${count === 1 ? 'book' : 'books'}${missing.length ? ` (${missing.length} without a file left out)` : ''}`, 4000);
+    } catch (err) {
+      console.error(err);
+      this.ui.toast('Could not save the library: ' + (err.message || err));
+    } finally {
+      this.importing = false;
+    }
+  }
+
+  pickLibrary() {
+    const input = document.getElementById('library-input');
+    input.value = '';
+    input.click();
+  }
+
+  /** Bring a .folio file into this library (books matched by their PDF; the one read last wins). */
+  async importLibrary(file) {
+    if (this.importing) return;
+    if (this.reader.isOpen) return void this.ui.toast('Close the book first, then bring the library in');
+    this.importing = true;
+    try {
+      const res = await importLibrary(file, this.metas, this.shelves, (i, n, title) => this.ui.toast(`Bringing in ${i + 1} of ${n} — ${title}`, 60000));
+      if (res.shelvesChanged) saveShelves(this.shelves);
+      const parts = [];
+      if (res.added) parts.push(`Added ${res.added}`);
+      if (res.updated) parts.push(`${res.updated} brought up to date`);
+      if (res.kept) parts.push(`${res.kept} already up to date`);
+      if (res.failed.length) parts.push(`${res.failed.length} could not be read`);
+      this.ui.toast(parts.join(' · ') || 'Nothing in that file', 5000);
+      await this.loadLibrary(res.lastId || undefined);
+      // books that came back with the other device's looks and flags are drawn again
+      for (const id of res.restyled) {
+        const m = this.metas.find((x) => x.id === id);
+        if (m) this.shelf.refreshEntry(m);
+      }
+      this.marks = await store.countMarks().catch(() => this.marks);
+      this.invalidate();
+    } catch (err) {
+      console.error(err);
+      this.ui.toast(err.message || 'Could not read that file');
+    } finally {
+      this.importing = false;
+    }
+  }
+
   pickFiles() {
     const input = document.getElementById('file-input');
     input.value = '';
@@ -845,6 +906,10 @@ class App {
     folder.addEventListener('change', () => {
       if (folder.files && folder.files.length) this.addFolder([...folder.files]);
     });
+    const libInput = document.getElementById('library-input');
+    libInput.addEventListener('change', () => {
+      if (libInput.files && libInput.files[0]) this.importLibrary(libInput.files[0]);
+    });
 
     c.addEventListener('pointerdown', (e) => this.onPointerDown(e));
     window.addEventListener('pointermove', (e) => this.onPointerMove(e));
@@ -877,6 +942,9 @@ class App {
       dragDepth = 0;
       drop.hidden = true;
       const files = [...(e.dataTransfer?.files || [])];
+      // a library file dropped on the window is brought in
+      const lib = files.find((f) => f.name.toLowerCase().endsWith(BACKUP_EXT));
+      if (lib) return void this.importLibrary(lib);
       const items = e.dataTransfer?.items;
       // a dropped folder becomes a shelf (the entries must be taken while the event lasts)
       const walk = items && items.length && items[0].webkitGetAsEntry ? filesFromDrop(items) : null;
