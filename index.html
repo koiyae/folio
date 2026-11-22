@@ -27,11 +27,12 @@
     <button class="brand" id="brand" type="button" aria-label="Folio — back to the shelf">FOLIO</button>
     <div class="top-right">
       <button class="mono-btn" id="add-btn" type="button">[ + ADD PDFS ]</button>
+      <button class="mono-btn" id="add-folder-btn" type="button" title="A folder becomes a shelf; its subfolders become sections">[ + FOLDER ]</button>
       <span class="mono dim" id="count">[ 0 BOOKS ]</span>
     </div>
   </div>
   <div class="sub-row">
-    <button class="mono-btn" id="sort-btn" type="button" aria-label="Change shelf order">[ FULL LIBRARY ]</button>
+    <button class="mono-btn" id="sort-btn" type="button" aria-label="Arrange the shelf" aria-expanded="false">[ FULL LIBRARY ]</button>
     <button class="mono-btn esc-hint" id="esc-hint" type="button">&larr; [ESC] TO SHELF</button>
     <div class="sub-right">
     <button class="icon-btn light-btn" id="light-btn" type="button" aria-label="Reading light" aria-pressed="false" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.1" id="light-icon"><path d="M10 2.2c1.7 2 2 3.4 0 5.1-2-1.7-1.7-3.1 0-5.1z" stroke-linejoin="round"/><path d="M10 7.3v1.6"/><rect x="6.6" y="9" width="6.8" height="8.4" rx="0.6"/></svg><span class="ct" id="light-time"></span></button>
@@ -51,15 +52,16 @@
 <section id="empty" hidden>
   <h1>An empty shelf.</h1>
   <p>Add PDFs from this device. They stay here — nothing is uploaded.</p>
-  <button class="mono-btn big" id="empty-add" type="button">[ + ADD PDFS ]</button>
-  <p class="mono dim hint-drop">or drop files anywhere</p>
+  <div class="empty-acts"><button class="mono-btn big" id="empty-add" type="button">[ + ADD PDFS ]</button><button class="mono-btn big" id="empty-folder" type="button">[ + ADD A FOLDER ]</button></div>
+  <p class="mono dim hint-drop">A folder becomes a shelf, its subfolders sections. Or drop files anywhere.</p>
 </section>
 
 <nav id="readerbar" aria-label="Reader controls" hidden>
+  <button type="button" class="rb back" id="rb-back" hidden aria-label="Back to the ribbon"><span aria-hidden="true">[</span><svg viewBox="0 0 12 10" aria-hidden="true"><path d="M4.4 1.4L1.2 4.6l3.2 3.2M1.6 4.6h6a3.1 3.1 0 0 1 0 6.2H6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg><span id="rb-back-p">1</span><span aria-hidden="true">]</span></button>
   <button type="button" class="rb" id="rb-prev" aria-label="Previous page"><span aria-hidden="true">[</span><svg viewBox="0 0 12 10" aria-hidden="true"><path d="M11 5H1.5M5 1.2L1.2 5 5 8.8" fill="none" stroke="currentColor" stroke-width="1.1"/></svg><span aria-hidden="true">]</span></button>
-  <button type="button" class="rb readout" id="rb-pages" aria-label="Go to page"><span id="rb-left">1</span><svg class="mark" id="rb-mark" viewBox="0 0 12 14" aria-hidden="true"><path d="M2 1h8v12L6 9.6 2 13z" fill="none" stroke="currentColor" stroke-width="1"/></svg><span id="rb-right">2</span></button>
+  <button type="button" class="rb readout" id="rb-pages" aria-label="Go to page"><span id="rb-left">1</span><svg class="mark" id="rb-mark" viewBox="0 0 12 14" aria-hidden="true"><path d="M2.5 13.4V1.2M2.5 1.6h8l-2 2.9 2 2.9h-8z" fill="none" stroke="currentColor" stroke-width="1"/></svg><span id="rb-right">2</span></button>
   <button type="button" class="rb" id="rb-next" aria-label="Next page"><span aria-hidden="true">[</span><svg viewBox="0 0 12 10" aria-hidden="true"><path d="M1 5h9.5M7 1.2L10.8 5 7 8.8" fill="none" stroke="currentColor" stroke-width="1.1"/></svg><span aria-hidden="true">]</span></button>
-  <button type="button" class="rb icon" id="rb-bookmark" aria-label="Bookmark this spread" aria-pressed="false"><svg viewBox="0 0 12 14" aria-hidden="true"><path d="M2 1h8v12L6 9.6 2 13z" fill="none" stroke="currentColor" stroke-width="1.1"/></svg></button>
+  <button type="button" class="rb icon" id="rb-bookmark" aria-label="Flag this spread" aria-pressed="false"><svg viewBox="0 0 12 14" aria-hidden="true"><path class="pole" d="M2.5 13.4V1.2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M2.5 1.6h8l-2 2.9 2 2.9h-8z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg></button>
   <button type="button" class="rb icon" id="rb-mag" aria-label="Turn on magnifier" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 5.3v5.4M5.3 8h5.4" stroke="currentColor" stroke-width="1.2"/><path d="M12.2 12.2l5.2 5.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>
   <span class="swatches" role="group" aria-label="Highlighter">
     <button type="button" class="rb sw" id="rb-pink" data-tool="pink" aria-label="Pink highlighter" aria-pressed="false"><i style="--ink:#ff5fa8"></i></button><button type="button" class="rb sw" id="rb-yellow" data-tool="yellow" aria-label="Yellow highlighter" aria-pressed="false"><i style="--ink:#f4e400"></i></button>
@@ -76,6 +78,20 @@
     <input type="range" id="goto-range" min="1" max="2" value="1">
     <div class="goto-row"><input type="number" id="goto-num" min="1" inputmode="numeric"><span class="mono dim" id="goto-of">/ 2</span><button type="button" class="mono-btn" id="goto-go">[ GO ]</button></div>
   </div>
+</div>
+
+<div id="arrange-pop" hidden aria-label="Arrange the shelf">
+  <div class="ip-head"><span class="mono">[ Arrange the shelf ]</span><button type="button" class="mono-btn" id="ap-done">[ Done ]</button></div>
+  <div class="ap-row"><span class="ip-l mono">Group</span><div class="ap-opts" id="ap-group" role="radiogroup" aria-label="Group"></div></div>
+  <div class="ap-row"><span class="ip-l mono">Order</span><div class="ap-opts" id="ap-order" role="radiogroup" aria-label="Order"></div></div>
+  <div class="ap-row"><span class="ip-l mono"></span><div class="ap-opts"><button type="button" class="mono-btn" id="ap-reverse" role="switch" aria-checked="false">[ Reverse ]</button></div></div>
+  <div class="ap-row"><span class="ip-l mono">Shelf</span><div class="ap-opts" id="ap-plank" role="radiogroup" aria-label="Shelf style"></div></div>
+  <div class="ap-shelves" id="ap-shelves" hidden>
+    <span class="ip-l mono">Your shelves</span>
+    <ul class="list" id="ap-shelf-list"></ul>
+    <div class="new-shelf-row"><input class="ap-field" id="ap-new-shelf" placeholder="New shelf" autocomplete="off" enterkeyhint="done" aria-label="Name of a new shelf"><button type="button" class="mono-btn" id="ap-add-shelf">[ + ADD ]</button></div>
+  </div>
+  <p class="note" id="ap-note"></p>
 </div>
 
 <div id="light-pop" hidden aria-label="Reading light">
@@ -135,9 +151,11 @@
   <div class="panel-body" id="panel-body"></div>
 </aside>
 
+<button type="button" id="flag-tip" hidden><span class="ft-p"></span><span class="ft-h"></span></button>
 <div id="toast" role="status" aria-live="polite"></div>
 <div id="drop" hidden><div>Drop PDFs to add them to the shelf</div></div>
 <input type="file" id="file-input" accept="application/pdf,.pdf" multiple hidden>
+<input type="file" id="folder-input" webkitdirectory multiple hidden>
 
 <script type="module" src="js/main.js"></script>
 </body>

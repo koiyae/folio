@@ -1,7 +1,8 @@
 // IndexedDB persistence. Everything stays on the device: PDF bytes, covers, reading position, annotations.
 //
 // stores
-//   books  { id, title, author, pages, aspect, size, fileName, addedAt, openedAt, spread, bookmarks[], look{}, outline? }
+//   books  { id, title, author, pages, aspect, size, fileName, addedAt, openedAt, spread, bookmarks[], look{}, outline?,
+//            shelf?, shelfName? (one of your shelves), order? (your own order) }
 //   files  { id, blob }                 — the original PDF
 //   covers { id, blob }                 — JPEG of page 1, rendered once at import
 //   marks  { key:"<id>|<page>", bookId, page, strokes[] }
@@ -25,7 +26,14 @@ function open() {
       }
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => {
+      // a newer version of the database (from a newer Folio) still opens, at its own version
+      if (req.error && req.error.name === 'VersionError') {
+        const again = indexedDB.open(DB_NAME);
+        again.onsuccess = () => resolve(again.result);
+        again.onerror = () => reject(again.error);
+      } else reject(req.error);
+    };
   });
   return dbp;
 }
@@ -63,6 +71,15 @@ export function listBooks() {
 
 export function putBook(book) {
   return tx(['books'], 'readwrite', (t) => reqP(t.objectStore('books').put(book)));
+}
+
+/** Save several books in one transaction. */
+export function putBooks(books) {
+  if (!books.length) return Promise.resolve();
+  return tx(['books'], 'readwrite', (t) => {
+    const s = t.objectStore('books');
+    for (const b of books) s.put(b);
+  });
 }
 
 export async function addBook(book, fileBlob, coverBlob) {
@@ -115,3 +132,15 @@ export function putMarks(bookId, page, strokes) {
     else s.put({ key, bookId, page, strokes });
   });
 }
+
+/** How many pages of each book carry marks: Map(bookId → count). Keys only, so it stays cheap. */
+export async function countMarks() {
+  const keys = await tx(['marks'], 'readonly', (t) => reqP(t.objectStore('marks').getAllKeys()));
+  const out = new Map();
+  for (const k of keys) {
+    const id = String(k).split('|')[0];
+    out.set(id, (out.get(id) || 0) + 1);
+  }
+  return out;
+}
+

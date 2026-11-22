@@ -5,6 +5,9 @@ import { clamp } from './anim.js';
 import * as store from './store.js';
 import { BINDINGS, bindingKind } from './binding.js';
 import { LIGHTS } from './lighting.js';
+import { GROUPS, ORDERS, sectionsOf } from './arrange.js';
+import { PLANK_STYLES } from './shelfdeco.js';
+import { RIBBONS } from './markers.js';
 import { inkSettings, PEN_COLORS, MARKER_COLORS, RANGES, TOOL_KIND, makeStroke, drawStroke, pressureFactor } from './ink.js';
 
 const $ = (id) => document.getElementById(id);
@@ -39,13 +42,16 @@ export class UI {
     const app = this.app;
     $('add-btn').addEventListener('click', () => app.pickFiles());
     $('empty-add').addEventListener('click', () => app.pickFiles());
+    $('add-folder-btn').addEventListener('click', () => app.pickFolder());
+    $('empty-folder').addEventListener('click', () => app.pickFolder());
     $('brand').addEventListener('click', () => {
       if (app.reader.isOpen) app.reader.close();
       this.closePanel();
     });
     $('esc-hint').addEventListener('click', () => app.reader.close());
     $('theme-btn').addEventListener('click', () => app.cycleTheme());
-    $('sort-btn').addEventListener('click', () => app.cycleSort());
+    $('sort-btn').addEventListener('click', () => this.toggleArrangePop());
+    this.initArrangePop();
     $('open-btn').addEventListener('click', () => {
       if (app.reader.isOpen) app.reader.close();
       else app.openSelected();
@@ -66,6 +72,8 @@ export class UI {
     $('rb-next').addEventListener('click', () => r().next());
     $('rb-close').addEventListener('click', () => r().close());
     $('rb-bookmark').addEventListener('click', () => r().toggleBookmark());
+    $('rb-back').addEventListener('click', () => r().returnToFinger());
+    $('flag-tip').addEventListener('click', () => this.flagTipGo && this.flagTipGo());
     $('rb-undo').addEventListener('click', () => r().undo());
     $('rb-mag').addEventListener('click', () => app.toggleMagnifier());
     this.initLightPop();
@@ -238,6 +246,53 @@ export class UI {
     if (!$('goto').hidden) this.syncGoto();
   }
 
+  /** The ribbon keeps page `page` while you look elsewhere (null: it lies where you are). */
+  setFinger(page) {
+    const b = $('rb-back');
+    b.hidden = page == null;
+    if (page != null) {
+      $('rb-back-p').textContent = page;
+      b.setAttribute('aria-label', `Back to page ${page}, where the ribbon is`);
+      b.title = 'Back to the ribbon (R)';
+    }
+  }
+
+  // ------------------------------------------------------------------ a raised flag's label
+  showFlagTip(flag, go) {
+    const t = $('flag-tip');
+    t.querySelector('.ft-p').textContent = `${flag.kind === 'bookmark' ? 'Flag' : 'Notes'} · p. ${flag.page}`;
+    t.querySelector('.ft-h').textContent = this.app.reader.isOpen ? 'Tap again to go there' : 'Tap again to open here';
+    t.setAttribute('aria-label', `Go to page ${flag.page}`);
+    this.flagTipGo = go;
+    t.hidden = false;
+    t.classList.remove('on');
+    this.flagTipShown = false;
+  }
+
+  hideFlagTip() {
+    const t = $('flag-tip');
+    t.hidden = true;
+    t.classList.remove('on');
+    this.flagTipGo = null;
+  }
+
+  /** Beside the flag (to its right, or its left near the screen's edge), level with its top. */
+  placeFlagTip(box) {
+    const t = $('flag-tip');
+    if (t.hidden) return;
+    const w = t.offsetWidth;
+    const right = box.r + 10 + w < window.innerWidth - 8;
+    const x = right ? box.r + 10 : box.l - 10 - w;
+    const y = clamp(box.t - 4, 8, window.innerHeight - 60);
+    t.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    t.classList.toggle('right', right);
+    t.classList.toggle('left', !right);
+    if (!this.flagTipShown) {
+      this.flagTipShown = true;
+      requestAnimationFrame(() => t.classList.add('on'));
+    }
+  }
+
   setMagnifier(on) {
     $('rb-mag').setAttribute('aria-pressed', String(on));
     $('rb-mag').setAttribute('aria-label', on ? 'Turn off magnifier' : 'Turn on magnifier');
@@ -308,6 +363,7 @@ export class UI {
     if (show) {
       this.toggleGoto(false);
       this.toggleInkPop(false);
+      if (!$('arrange-pop').hidden) this.toggleArrangePop(false);
       this.buildLightPop();
     }
   }
@@ -404,6 +460,204 @@ export class UI {
     if (!$('goto').hidden) this.toggleGoto(false);
     if (!$('light-pop').hidden) this.toggleLightPop(false);
     if (!$('ink-pop').hidden) this.toggleInkPop(false);
+    if (!$('arrange-pop').hidden) this.toggleArrangePop(false);
+  }
+
+  // ------------------------------------------------------------------ arranging the shelf
+  initArrangePop() {
+    const app = this.app;
+    const make = (box, list, key) => {
+      for (const o of list) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'mono-btn';
+        b.setAttribute('role', 'radio');
+        b.dataset[key] = o.key;
+        b.textContent = `[ ${o.label} ]`;
+        b.addEventListener('click', () => {
+          app.setArrangement({ [key]: o.key });
+          this.syncArrangePop();
+        });
+        box.appendChild(b);
+      }
+    };
+    make($('ap-group'), GROUPS, 'group');
+    make($('ap-order'), ORDERS, 'order');
+    make($('ap-plank'), PLANK_STYLES, 'plank');
+    $('ap-done').addEventListener('click', () => this.toggleArrangePop(false));
+    $('ap-reverse').addEventListener('click', () => {
+      app.setArrangement({ reverse: !app.reverse });
+      this.syncArrangePop();
+    });
+    const add = () => {
+      const input = $('ap-new-shelf');
+      const name = input.value.trim();
+      if (!name) return input.focus();
+      app.createShelf(name);
+      input.value = '';
+      this.syncArrangePop();
+    };
+    $('ap-add-shelf').addEventListener('click', add);
+    $('ap-new-shelf').addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') add();
+    });
+    $('arrange-pop').addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') e.stopPropagation();
+    });
+  }
+
+  toggleArrangePop(force) {
+    const el = $('arrange-pop');
+    const show = (force ?? el.hidden) && !this.app.reader.isOpen;
+    el.hidden = !show;
+    $('sort-btn').setAttribute('aria-expanded', String(show));
+    if (show) {
+      this.toggleLightPop(false);
+      this.syncArrangePop();
+    }
+  }
+
+  syncArrangePop() {
+    const app = this.app;
+    const on = (box, key, val) => box.querySelectorAll('button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset[key] === val)));
+    on($('ap-group'), 'group', app.group);
+    on($('ap-order'), 'order', app.sort);
+    on($('ap-plank'), 'plank', app.plank);
+    $('ap-reverse').setAttribute('aria-checked', String(app.reverse));
+    const shelves = app.group === 'shelves';
+    $('ap-shelves').hidden = !shelves;
+    if (shelves) {
+      const list = $('ap-shelf-list');
+      list.textContent = '';
+      app.shelves.forEach((s, i) => {
+        const n = app.metas.filter((m) => m.shelf === s.id).length;
+        const li = document.createElement('li');
+        li.innerHTML = `<button type="button" class="open"><span>${esc(s.name)}</span><span class="pg">${n}</span></button><button type="button" class="mv" aria-label="Move up"${i ? '' : ' disabled'}>↑</button><button type="button" class="mv" aria-label="Move down"${i < app.shelves.length - 1 ? '' : ' disabled'}>↓</button>`;
+        const [open, up, down] = li.querySelectorAll('button');
+        open.addEventListener('click', () => {
+          this.toggleArrangePop(false);
+          const ri = app.shelf.rows.findIndex((r) => r.shelfId === s.id);
+          if (ri >= 0) app.shelf.goToRow(ri);
+          this.openShelfPanel(app.shelf.rows[ri] || { shelfId: s.id, label: s.name });
+        });
+        up.addEventListener('click', () => {
+          app.moveShelf(s.id, -1);
+          this.syncArrangePop();
+        });
+        down.addEventListener('click', () => {
+          app.moveShelf(s.id, 1);
+          this.syncArrangePop();
+        });
+        list.appendChild(li);
+      });
+      if (!app.shelves.length) list.innerHTML = '<li class="note">No shelves yet. Name one below, then give it books from its name plate or a book’s details.</li>';
+    }
+    const notes = {
+      none: 'One shelf, in the order you choose.',
+      author: 'A section for every author with two or more books; the others stand under their letter. Tap a label on the shelf’s edge to go to its section.',
+      letter: 'A section for every first letter of the title. Tap a label on the shelf’s edge to go to it.',
+      status: 'Reading now, not started, finished.',
+      shelves: 'A bookcase of your own shelves, one shelf per book. Swipe up and down between them; tap a shelf’s name plate to rename it or choose its books.',
+    };
+    let note = notes[app.group] || '';
+    if (app.sort === 'manual') note += ' Press and hold a book to carry it to a new place.';
+    else note += ' Press and hold a book to move it by hand.';
+    $('ap-note').textContent = note;
+  }
+
+  /** A shelf of the bookcase: its name, its place, which books stand on it. */
+  openShelfPanel(row) {
+    const app = this.app;
+    this.toggleArrangePop(false);
+    const s = app.shelves.find((x) => x.id === row.shelfId);
+    const books = [...app.metas].sort((a, b) => (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base', numeric: true }));
+    const nameOf = (id) => (app.shelves.find((x) => x.id === id) || {}).name;
+    if (!s) {
+      // the books that stand on no shelf yet
+      this.openPanel(
+        'details',
+        '[ SHELF ]',
+        `<section><h2>${esc(row.label || 'Not on a shelf')}</h2><p class="byline">+ ${books.filter((m) => !m.shelf).length} books +</p></section>
+         <section><p class="note">Books you haven't put on one of your shelves stand here. Give them a shelf from a shelf's name plate, or from a book's details.</p></section>
+         <section><span class="k">[ New shelf ]</span><div class="new-shelf-row"><input class="field" id="f-new-shelf" placeholder="Name" autocomplete="off"><button type="button" class="mono-btn" data-act="create">[ CREATE ]</button></div></section>`,
+      );
+      const input = this.panelBody.querySelector('#f-new-shelf');
+      const create = () => {
+        const v = input.value.trim();
+        if (!v) return input.focus();
+        const ns = app.createShelf(v);
+        this.openShelfPanel({ shelfId: ns.id, label: ns.name });
+      };
+      this.panelBody.querySelector('[data-act="create"]').addEventListener('click', create);
+      input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') create();
+      });
+      return;
+    }
+    const count = app.metas.filter((m) => m.shelf === s.id).length;
+    const secs = sectionsOf(app.metas, s.id);
+    this.openPanel(
+      'details',
+      '[ SHELF ]',
+      `<section><h2>${esc(s.name)}</h2><p class="byline">+ ${count} ${count === 1 ? 'book' : 'books'} +</p></section>
+       <section><span class="k">[ Name ]</span><input class="field" id="f-shelf-name" value="${esc(s.name)}" aria-label="Shelf name" autocomplete="off"></section>
+       <section><span class="k">[ Sections ]</span>${
+         secs.length
+           ? `<p class="note">Rename a section here; clear its name to let its books stand loose. To move a book between sections, carry it over the gap (press and hold), or set it in the book's details.</p>${secs
+               .map((x) => `<input class="field sec-name" data-sec="${esc(x)}" value="${esc(x)}" aria-label="Section name" autocomplete="off">`)
+               .join('')}`
+           : '<p class="note">No sections. An added folder\'s subfolders become sections; you can also name a book\'s section in its details.</p>'
+       }</section>
+       <section><span class="k">[ Books on this shelf ]</span><p class="note">A book stands on one shelf: ticking it here takes it off its other shelf.</p>
+         <ul class="list check-list">${books
+           .map((m) => `<li><label><input type="checkbox" data-id="${esc(m.id)}"${m.shelf === s.id ? ' checked' : ''}><span>${esc(m.title)}</span>${m.shelf && m.shelf !== s.id ? `<span class="dim">on ${esc(nameOf(m.shelf) || 'another shelf')}</span>` : ''}</label></li>`)
+           .join('')}</ul></section>
+       <section class="panel-actions">
+         <button type="button" class="mono-btn danger" data-act="delete">[ REMOVE SHELF ]</button>
+         <div id="confirm-delete" hidden><p class="note">Remove the shelf “${esc(s.name)}”? Its books stay in your library, on no shelf.</p>
+           <div class="seg"><button type="button" class="mono-btn danger" data-act="delete-yes">[ YES, REMOVE IT ]</button><button type="button" class="mono-btn" data-act="delete-no">[ KEEP IT ]</button></div></div>
+       </section>`,
+    );
+    const body = this.panelBody;
+    body.querySelectorAll('.sec-name').forEach((f) => {
+      f.addEventListener('change', async () => {
+        await app.renameSection(s.id, f.dataset.sec, f.value);
+        f.dataset.sec = f.value.trim();
+      });
+      f.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') f.blur();
+      });
+    });
+    const name = body.querySelector('#f-shelf-name');
+    name.addEventListener('change', () => {
+      app.renameShelf(s.id, name.value);
+      body.querySelector('h2').textContent = s.name;
+    });
+    name.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') name.blur();
+    });
+    body.querySelectorAll('input[type="checkbox"]').forEach((c) =>
+      c.addEventListener('change', async () => {
+        const m = app.metas.find((x) => x.id === c.dataset.id);
+        if (!m) return;
+        await app.setBookShelf(m, c.checked ? s.id : null);
+        const tag = c.closest('label').querySelector('.dim');
+        if (tag && c.checked) tag.remove();
+        const n = app.metas.filter((x) => x.shelf === s.id).length;
+        body.querySelector('.byline').textContent = `+ ${n} ${n === 1 ? 'book' : 'books'} +`;
+      }),
+    );
+    body.querySelector('[data-act="delete"]').addEventListener('click', () => (body.querySelector('#confirm-delete').hidden = false));
+    body.querySelector('[data-act="delete-no"]').addEventListener('click', () => (body.querySelector('#confirm-delete').hidden = true));
+    body.querySelector('[data-act="delete-yes"]').addEventListener('click', async () => {
+      this.closePanel();
+      await app.deleteShelf(s.id);
+      this.toast(`Removed the shelf “${s.name}”`, 2400);
+    });
   }
 
   // ------------------------------------------------------------------ pen & highlighter settings
@@ -728,13 +982,26 @@ export class UI {
       <section><span class="k">[ Bookmarks ]</span>${
         bookmarks.length
           ? `<ul class="list">${bookmarks.map((s) => `<li><button type="button" data-spread="${s}"><span>Spread ${Math.max(1, s * 2)}–${s * 2 + 1}</span><span class="pg">p. ${Math.max(1, s * 2)}</span></button></li>`).join('')}</ul>`
-          : '<p class="note">Use the ribbon in the reader bar (or B) to mark a spread.</p>'
+          : '<p class="note">Flag a spread with the flag in the reader bar (or B). Flags stick out of the top of the book: tap one twice to go there.</p>'
       }</section>
       <section id="marks-sec"><span class="k">[ Annotations ]</span><p class="note">Counting…</p></section>
       <section>
         <span class="k">[ Title + Author ]</span>
         <input class="field" id="f-title" value="${esc(meta.title)}" aria-label="Title" autocomplete="off">
         <input class="field" id="f-author" value="${esc(meta.author)}" placeholder="Author" aria-label="Author" autocomplete="off">
+      </section>
+      <section>
+        <span class="k">[ Shelf ]</span>
+        <select class="field" id="f-shelf" aria-label="Shelf">
+          <option value="">On no shelf</option>
+          ${app.shelves.map((x) => `<option value="${esc(x.id)}"${meta.shelf === x.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
+          <option value="__new">New shelf…</option>
+        </select>
+        <div class="new-shelf-row" id="f-new-shelf-row" hidden><input class="field" id="f-new-shelf-name" placeholder="Name of the new shelf" autocomplete="off"><button type="button" class="mono-btn" data-act="new-shelf">[ CREATE ]</button></div>
+        <div id="f-section-row"${meta.shelf ? '' : ' hidden'}>
+          <input class="field" id="f-section" value="${esc(meta.section || '')}" placeholder="Section on the shelf (none)" aria-label="Section" autocomplete="off" list="f-sections">
+          <datalist id="f-sections">${sectionsOf(app.metas, meta.shelf).map((x) => `<option value="${esc(x)}">`).join('')}</datalist>
+        </div>
       </section>
       <section>
         <span class="k">[ Binding ]</span>
@@ -749,6 +1016,11 @@ export class UI {
         </div>
         <div class="seg"><span class="mono dim">Spine</span>
           ${['serif', 'mono', 'sans'].map((s) => `<button type="button" class="mono-btn" data-spine="${s}" aria-pressed="${look.spineStyle === s}">${s}</button>`).join('')}
+        </div>
+        <div class="seg ribbon-seg"><span class="mono dim">Ribbon</span>
+          <span class="cloths ribbons">${RIBBONS.map((r) => `<button type="button" style="--c:${r.hex}" data-ribbon="${r.hex}" aria-label="${r.name} ribbon" aria-pressed="${look.ribbon === r.hex}"></button>`).join('')}</span>
+          <button type="button" class="mono-btn" data-ribbon="auto" aria-pressed="${!look.ribbon || look.ribbon === 'auto'}">Matching</button>
+          <button type="button" class="mono-btn" data-ribbon="none" aria-pressed="${look.ribbon === 'none'}">None</button>
         </div>
       </section>
       <section>
@@ -835,6 +1107,50 @@ export class UI {
         body.querySelectorAll('[data-spine]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
       }),
     );
+    body.querySelectorAll('[data-ribbon]').forEach((b) =>
+      b.addEventListener('click', () => {
+        app.setLook(meta, { ribbon: b.dataset.ribbon });
+        body.querySelectorAll('[data-ribbon]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      }),
+    );
+    const shelfSel = body.querySelector('#f-shelf');
+    const newRow = body.querySelector('#f-new-shelf-row');
+    shelfSel.addEventListener('change', async () => {
+      if (shelfSel.value === '__new') {
+        newRow.hidden = false;
+        body.querySelector('#f-new-shelf-name').focus();
+        return;
+      }
+      newRow.hidden = true;
+      await app.setBookShelf(meta, shelfSel.value || null);
+      body.querySelector('#f-section-row').hidden = !meta.shelf;
+      body.querySelector('#f-section').value = '';
+      body.querySelector('#f-sections').innerHTML = sectionsOf(app.metas, meta.shelf).map((x) => `<option value="${esc(x)}">`).join('');
+      this.toast(shelfSel.value ? `On the shelf “${app.shelves.find((x) => x.id === shelfSel.value).name}”` : 'On no shelf', 2000);
+    });
+    const createShelf = async () => {
+      const input = body.querySelector('#f-new-shelf-name');
+      const v = input.value.trim();
+      if (!v) return input.focus();
+      const ns = app.createShelf(v);
+      await app.setBookShelf(meta, ns.id);
+      this.openDetails(meta);
+      this.toast(`On the new shelf “${ns.name}”`, 2000);
+    };
+    body.querySelector('[data-act="new-shelf"]').addEventListener('click', createShelf);
+    const secField = body.querySelector('#f-section');
+    secField.addEventListener('change', async () => {
+      await app.setBookSection(meta, secField.value);
+      this.toast(meta.section ? `In the section “${meta.section}”` : 'In no section', 1800);
+    });
+    secField.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') secField.blur();
+    });
+    body.querySelector('#f-new-shelf-name').addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') createShelf();
+    });
     body.querySelector('[data-act="export"]').addEventListener('click', () => app.exportBook(meta));
     body.querySelector('[data-act="remove"]').addEventListener('click', () => (body.querySelector('#confirm-remove').hidden = false));
     body.querySelector('[data-act="remove-no"]').addEventListener('click', () => (body.querySelector('#confirm-remove').hidden = true));

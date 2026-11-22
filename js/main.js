@@ -14,7 +14,9 @@ import { restyleBookMaterials } from './book3d.js';
 import { UI } from './ui.js';
 import { Magnifier } from './magnifier.js';
 import * as store from './store.js';
-import { importFiles, exportAnnotated } from './library.js';
+import { importFiles, exportAnnotated, folderShelves, filesFromDrop } from './library.js';
+import { inkPagesOf, ribbonColor } from './markers.js';
+import { GROUPS, ORDERS, layout as arrangeLayout, sortBooks, loadShelves, saveShelves, reconcileShelves, newShelfId, seedManualOrder, orderBetween } from './arrange.js';
 import {
   makeGrainTexture,
   makeDeferredPaperTextures,
@@ -25,12 +27,7 @@ import { clamp, lerp } from './anim.js';
 
 const DEG = Math.PI / 180;
 const FOV = 18;
-const SORTS = [
-  { key: 'added', label: 'FULL LIBRARY · ADDED' },
-  { key: 'title', label: 'FULL LIBRARY · TITLE' },
-  { key: 'author', label: 'FULL LIBRARY · AUTHOR' },
-  { key: 'recent', label: 'FULL LIBRARY · RECENT' },
-];
+
 const THEMES = ['light', 'dark', 'color'];
 
 function pref(key, fallback) {
@@ -53,7 +50,12 @@ class App {
     this.isTouch = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 1;
     this.penSeen = false;
     this.metas = [];
-    this.sort = pref('sort', 'added');
+    this.sort = ORDERS.some((o) => o.key === pref('sort', 'added')) ? pref('sort', 'added') : 'added';
+    this.group = GROUPS.some((g) => g.key === pref('group', 'none')) ? pref('group', 'none') : 'none';
+    this.reverse = pref('reverse', '0') === '1';
+    this.plank = pref('plank', 'oak');
+    this.shelves = loadShelves();
+    this.marks = new Map();
     this.theme = pref('theme', 'light');
     this.dirty = 3;
     this.lastT = performance.now() / 1000;
@@ -89,7 +91,9 @@ class App {
     this.magnifier = new Magnifier();
     this.shelf.onSelect = (e) => this.onSelect(e);
     this.ui.setTheme(this.theme, null);
-    this.ui.setSortLabel(SORTS.find((s) => s.key === this.sort)?.label || SORTS[0].label);
+    this.ui.setSortLabel(this.arrangeLabel());
+    this.shelf.onRowChange = (row) => this.onRowChange(row);
+    this.shelf.setPlank(this.plank, this.theme === 'dark');
     this.resize();
     this.bindInput();
     await this.loadLibrary();
@@ -228,37 +232,238 @@ class App {
   }
 
   // ================================================================= library
-  async loadLibrary(selectId) {
+  async loadLibrary(selectId, { animate = false } = {}) {
     this.metas = await store.listBooks();
-    const sorted = this.sortedMetas();
+    this.marks = await store.countMarks().catch(() => new Map());
+    if (reconcileShelves(this.shelves, this.metas)) saveShelves(this.shelves);
     if (!selectId) {
       const recent = [...this.metas].sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0))[0];
       selectId = recent ? recent.id : null;
     }
-    await this.shelf.setBooks(sorted, selectId);
-    this.ui.setTitles(sorted);
-    this.ui.setCount(sorted.length);
-    if (!sorted.length) this.ui.setNow(null);
+    this.arrange(selectId, { animate });
+    this.ui.setCount(this.metas.length);
+    if (!this.metas.length) this.ui.setNow(null);
+    this.invalidate();
+    this.fillInkPages();
+  }
+
+  /** Books annotated before flags existed: note which of their pages carry ink (once, in the background). */
+  async fillInkPages() {
+    if (this.fillingInk) return;
+    this.fillingInk = true;
+    try {
+      for (const m of this.metas) {
+        if (m.inkPages || !(this.marks.get(m.id) > 0)) continue;
+        if (this.reader.isOpen && this.reader.meta === m) continue;
+        m.inkPages = inkPagesOf(await store.getMarks(m.id));
+        await store.putBook(m);
+        const e = this.shelf.all.get(m.id);
+        if (e) this.shelf.syncMarkers(e);
+      }
+    } catch (err) {
+      console.warn('flags', err);
+    } finally {
+      this.fillingInk = false;
+    }
+  }
+
+  // ---------------------------------------------------------------- flags
+  /**
+   * A tap on a flag. The first only raises it and shows where it leads, so a stray tap never takes you away;
+   * tapping it again (or its label) goes there, the ribbon keeping your place.
+   */
+  flagTap(hit, where) {
+    const pk = this.peek;
+    if (pk && pk.where === where && pk.flag.key === hit.flag.key && pk.entry === hit.entry) {
+      this.goToFlag();
+      return;
+    }
+    this.clearPeek();
+    this.peek = { ...hit, where };
+    if (where === 'shelf') this.shelf.liftFlag(hit.entry, hit.flag.key);
+    this.ui.showFlagTip(hit.flag, () => this.goToFlag());
+    clearTimeout(this.peekT);
+    this.peekT = setTimeout(() => this.clearPeek(), this.peekMs || 6000);
     this.invalidate();
   }
 
-  sortedMetas() {
-    const m = [...this.metas];
-    const by = (f) => (a, b) => f(a).localeCompare(f(b), undefined, { sensitivity: 'base', numeric: true });
-    switch (this.sort) {
-      case 'title':
-        m.sort(by((x) => x.title.replace(/^(the|a|an)\s+/i, '')));
-        break;
-      case 'author':
-        m.sort(by((x) => (x.author || '~') + x.title));
-        break;
-      case 'recent':
-        m.sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0) || b.addedAt - a.addedAt);
-        break;
-      default:
-        m.sort((a, b) => a.addedAt - b.addedAt);
+  clearPeek() {
+    const pk = this.peek;
+    if (!pk) return;
+    this.peek = null;
+    clearTimeout(this.peekT);
+    if (pk.where === 'shelf') this.shelf.liftFlag(pk.entry, null);
+    this.ui.hideFlagTip();
+    this.invalidate();
+  }
+
+  goToFlag() {
+    const pk = this.peek;
+    if (!pk) return;
+    this.clearPeek();
+    if (pk.where === 'reader') this.reader.jumpTo(pk.flag.spread);
+    else if (!this.reader.isOpen) {
+      this.ui.closePanel();
+      this.reader.open(pk.entry, { at: pk.flag.spread });
     }
-    return m;
+  }
+
+  /** Keep a raised flag's label beside it (or drop the flag when it has gone from view). */
+  placePeek() {
+    const pk = this.peek;
+    if (!pk) return;
+    let box = null;
+    if (pk.where === 'reader') box = this.reader.isOpen ? this.reader.flagBox(pk.flag.key) : null;
+    else if (!this.reader.isOpen) {
+      const it = this.shelf.flagBoxes(pk.entry).find((x) => x.flag.key === pk.flag.key);
+      box = it ? it.box : null;
+    }
+    if (!box) this.clearPeek();
+    else this.ui.placeFlagTip(box);
+  }
+
+  /** Stand the books on the shelf as the current grouping and order say. */
+  arrange(selectId = null, { animate = false } = {}) {
+    const L = arrangeLayout(this.metas, { group: this.group, order: this.sort, reverse: this.reverse, shelves: this.shelves, marks: this.marks });
+    this.shelf.setLayout(L, selectId, { animate });
+    this.ui.setTitles(this.shelf.entries.map((e) => e.meta));
+    this.ui.setSortLabel(this.arrangeLabel());
+  }
+
+  arrangeLabel() {
+    const g = GROUPS.find((x) => x.key === this.group) || GROUPS[0];
+    const o = ORDERS.find((x) => x.key === this.sort) || ORDERS[0];
+    return `${g.title} · ${o.short}${this.reverse ? ' ↓' : ''}`;
+  }
+
+  /** Change how the books stand: { group, order, reverse, plank }. The books glide to their new places. */
+  async setArrangement(patch) {
+    if (patch.plank) {
+      this.plank = patch.plank;
+      setPref('plank', this.plank);
+      this.shelf.setPlank(this.plank, this.theme === 'dark');
+    }
+    if (patch.group) {
+      this.group = patch.group;
+      setPref('group', this.group);
+    }
+    if (patch.order) {
+      if (patch.order === 'manual' && this.sort !== 'manual' && !this.metas.some((m) => m.order != null)) {
+        // "My order" starts from the order the shelf shows now
+        store.putBooks(seedManualOrder(sortBooks(this.metas, this.sort, this.reverse, this.marks))).catch((e) => console.warn('save order', e));
+      }
+      this.sort = patch.order;
+      setPref('sort', this.sort);
+    }
+    if (patch.reverse != null) {
+      this.reverse = !!patch.reverse;
+      setPref('reverse', this.reverse ? '1' : '0');
+    }
+    this.ui.setSortLabel(this.arrangeLabel());
+    if (patch.group || patch.order || patch.reverse != null) {
+      if (this.reader.isOpen) {
+        this.libraryDirty = true;
+        return;
+      }
+      if (patch.order === 'marked') this.marks = await store.countMarks().catch(() => this.marks);
+      const cur = this.currentMeta();
+      this.arrange(cur && cur.id, { animate: true });
+    }
+    this.invalidate();
+  }
+
+  // ---------------------------------------------------------------- your shelves
+  createShelf(name) {
+    const s = { id: newShelfId(), name: (name || '').trim().slice(0, 40) || 'New shelf' };
+    this.shelves.push(s);
+    saveShelves(this.shelves);
+    this.relayout(null, true);
+    return s;
+  }
+
+  renameShelf(id, name) {
+    const s = this.shelves.find((x) => x.id === id);
+    const n = (name || '').trim().slice(0, 40);
+    if (!s || !n) return;
+    s.name = n;
+    saveShelves(this.shelves);
+    const books = this.metas.filter((m) => m.shelf === id);
+    for (const m of books) m.shelfName = n;
+    store.putBooks(books).catch(() => {});
+    this.relayout();
+  }
+
+  moveShelf(id, dir) {
+    const i = this.shelves.findIndex((x) => x.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= this.shelves.length) return;
+    [this.shelves[i], this.shelves[j]] = [this.shelves[j], this.shelves[i]];
+    saveShelves(this.shelves);
+    this.relayout();
+  }
+
+  async deleteShelf(id) {
+    const changed = this.metas.filter((m) => m.shelf === id);
+    for (const m of changed) {
+      m.shelf = null;
+      m.shelfName = null;
+      m.section = null;
+    }
+    await store.putBooks(changed);
+    this.shelves = this.shelves.filter((x) => x.id !== id);
+    saveShelves(this.shelves);
+    this.relayout();
+  }
+
+  /** Put a book on one of your shelves (null: on none). One shelf per book. */
+  async setBookShelf(meta, shelfId, section = null) {
+    const s = this.shelves.find((x) => x.id === shelfId);
+    // sections belong to a shelf: a book changing shelves leaves its section behind
+    if ((meta.shelf || null) !== (s ? s.id : null) || section != null) meta.section = s && section ? section : null;
+    meta.shelf = s ? s.id : null;
+    meta.shelfName = s ? s.name : null;
+    await store.putBook(meta);
+    this.relayout(meta.id);
+  }
+
+  /** A book's section on its shelf ('' or null: none). */
+  async setBookSection(meta, name) {
+    const v = (name || '').trim().slice(0, 60) || null;
+    if ((meta.section || null) === v) return;
+    meta.section = meta.shelf ? v : null;
+    await store.putBook(meta);
+    this.relayout(meta.id);
+  }
+
+  /** Rename a section of a shelf (every book in it); an empty name dissolves it. */
+  async renameSection(shelfId, from, to) {
+    const v = (to || '').trim().slice(0, 60) || null;
+    const books = this.metas.filter((m) => m.shelf === shelfId && m.section === from);
+    if (!books.length || v === from) return;
+    for (const m of books) m.section = v;
+    await store.putBooks(books);
+    this.relayout();
+  }
+
+  /** Re-stand the books after a change, keeping the face-out book (or `selectId`). */
+  relayout(selectId = null, toNewShelf = false) {
+    if (this.reader.isOpen) {
+      this.libraryDirty = true;
+      return;
+    }
+    const cur = this.currentMeta();
+    this.arrange(selectId || (cur && cur.id), { animate: true });
+    if (toNewShelf && this.group === 'shelves') this.shelf.goToRow(this.shelves.length - 1);
+    this.invalidate();
+  }
+
+  onRowChange(row) {
+    this.ui.setTitles(row.entries.map((e) => e.meta));
+    this.ui.setShelfName && this.ui.setShelfName(this.shelf.mode === 'case' ? row.label : null);
+  }
+
+  sortedMetas() {
+    return sortBooks(this.metas, this.sort, this.reverse, this.marks);
   }
 
   currentMeta() {
@@ -268,22 +473,9 @@ class App {
   }
 
   onSelect(entry) {
+    if (this.peek && this.peek.where === 'shelf' && this.peek.entry !== entry) this.clearPeek();
     this.ui.setNow(entry.meta);
     if (this.theme === 'color') this.ui.setTheme('color', entry.look);
-  }
-
-  async cycleSort() {
-    const i = SORTS.findIndex((s) => s.key === this.sort);
-    const next = SORTS[(i + 1) % SORTS.length];
-    this.sort = next.key;
-    setPref('sort', this.sort);
-    this.ui.setSortLabel(next.label);
-    if (this.reader.isOpen) {
-      this.libraryDirty = true;
-      return;
-    }
-    const cur = this.currentMeta();
-    await this.loadLibrary(cur && cur.id);
   }
 
   cycleTheme() {
@@ -293,14 +485,14 @@ class App {
     const e = this.shelf.entries[this.shelf.selected];
     this.ui.setTheme(this.theme, this.reader.isOpen ? this.reader.entry.look : e && e.look);
     this.shadowMat.opacity = this.theme === 'light' ? 0.3 : this.theme === 'dark' ? 0.7 : 0.5;
+    this.shelf.setPlank(this.plank, this.theme === 'dark');
     this.lightBase.ambient = this.theme === 'dark' ? 1.0 : 1.15;
     this.invalidate();
   }
 
   selectBook(id) {
     if (this.reader.isOpen) return;
-    const i = this.shelf.entries.findIndex((e) => e.meta.id === id);
-    if (i >= 0) this.shelf.select(i);
+    this.shelf.selectById(id);
   }
 
   openSelected() {
@@ -329,8 +521,8 @@ class App {
       this.reader.close();
       return;
     }
-    if (page) meta.spread = clamp(Math.floor(page / 2), 0, Math.ceil(meta.pages / 2));
-    this.pending = { id };
+    // opened at a page: the ribbon stays where you were reading
+    this.pending = { id, at: page ? clamp(Math.floor(page / 2), 0, Math.ceil(meta.pages / 2)) : null };
     this.selectBook(id);
   }
 
@@ -374,8 +566,15 @@ class App {
       if (!dark && luminance(look.accent) > 0.4) look.accent = '#1d1b19';
     }
     meta.look = look;
-    const e = this.shelf.entries.find((x) => x.meta.id === meta.id);
+    const e = this.shelf.all.get(meta.id);
     if (e) e.look = look;
+    if (this.reader.isOpen && this.reader.meta === meta) this.reader.setRibbon(ribbonColor(look));
+    if (Object.keys(patch).every((k) => k === 'ribbon')) {
+      // only the ribbon: no need to print the book again
+      store.putBook(meta).catch(() => {});
+      if (e) this.shelf.syncMarkers(e);
+      return;
+    }
     this.updateMeta(meta, { retexture: true });
     if (this.theme === 'color') this.ui.setTheme('color', look);
   }
@@ -404,11 +603,10 @@ class App {
       return;
     }
     await store.deleteBook(meta.id);
+    const row = this.shelf.entries;
     const idx = this.shelf.selected;
-    this.metas = this.metas.filter((m) => m.id !== meta.id);
-    const sorted = this.sortedMetas();
-    const next = sorted[Math.min(idx, sorted.length - 1)];
-    await this.loadLibrary(next && next.id);
+    const next = row[idx + 1] || row[idx - 1];
+    await this.loadLibrary(next && next.meta.id !== meta.id ? next.meta.id : null);
     this.ui.toast('Removed from the shelf');
   }
 
@@ -442,12 +640,142 @@ class App {
     input.click();
   }
 
+  pickFolder() {
+    const input = document.getElementById('folder-input');
+    input.value = '';
+    input.click();
+  }
+
+  /**
+   * Add a whole folder as one of your shelves; its subfolders become sections on it. Several folders (dropped
+   * together) give several shelves. A shelf of the same name gets the new books; books already in the library
+   * that stand on no shelf join it. The bookcase shows the shelf while it fills.
+   */
+  async addFolder(files, pathOf) {
+    if (this.importing) return;
+    let groups = folderShelves(files, pathOf);
+    if (!groups.length) {
+      this.ui.toast('No PDFs in that folder', 2600);
+      return;
+    }
+    // without folder paths (an older iPad) the files still make one new shelf; loose files dropped beside
+    // folders are added the ordinary way
+    const loose = groups.find((g) => !g.name);
+    if (loose && groups.length === 1) loose.name = 'New shelf';
+    else if (loose) groups = groups.filter((g) => g !== loose);
+    this.importing = true;
+    const total = groups.reduce((n, g) => n + g.files.length, 0);
+    const reading = this.reader.isOpen;
+    let done = 0;
+    let lastId = null;
+    const report = { added: 0, moved: 0, skipped: 0, failed: 0, shelves: [] };
+    try {
+      if (this.group !== 'shelves') {
+        this.group = 'shelves';
+        setPref('group', this.group);
+        this.ui.setSortLabel(this.arrangeLabel());
+      }
+      for (const g of groups) {
+        const name = g.name.trim().slice(0, 40) || 'New shelf';
+        let s = this.shelves.find((x) => x.name.toLowerCase() === name.toLowerCase());
+        if (!s) {
+          s = { id: newShelfId(), name };
+          this.shelves.push(s);
+          saveShelves(this.shelves);
+        }
+        report.shelves.push(s);
+        // show the shelf straight away, and let it fill
+        if (!reading) {
+          this.arrange(null, { animate: true });
+          const ri = this.shelf.rows.findIndex((r) => r.shelfId === s.id);
+          if (ri >= 0) this.shelf.goToRow(ri);
+        }
+        const order = this.sort === 'manual' ? Math.max(0, ...this.metas.map((m) => m.order || 0)) + 1024 : null;
+        const res = await importFiles(
+          g.files,
+          this.metas,
+          (i, n, fname) => this.ui.toast(`${name} · adding ${done + i + 1} of ${total} — ${fname}`, 60000),
+          {
+            shelf: s.id,
+            shelfName: s.name,
+            order,
+            sectionFor: (f) => g.sectionOf.get(f),
+            onAdded: (m) => {
+              this.metas.push(m);
+              lastId = m.id;
+              this.importTick(m.id);
+            },
+          },
+        );
+        done += g.files.length;
+        const moved = [];
+        for (const { meta, file } of res.known) {
+          if (meta.shelf) continue;
+          meta.shelf = s.id;
+          meta.shelfName = s.name;
+          meta.section = g.sectionOf.get(file) || null;
+          moved.push(meta);
+        }
+        if (moved.length) await store.putBooks(moved);
+        report.added += res.added.length;
+        report.moved += moved.length;
+        report.skipped += res.skipped.length - moved.length;
+        report.failed += res.failed.length;
+      }
+      // the summary
+      const parts = [];
+      const shelfNames = report.shelves.map((x) => `“${x.name}”`).join(', ');
+      if (report.added || report.moved) {
+        const n = report.added + report.moved;
+        const secs = new Set(this.metas.filter((m) => report.shelves.some((x) => x.id === m.shelf) && m.section).map((m) => m.shelf + '|' + m.section)).size;
+        parts.push(`${shelfNames}: ${n} ${n === 1 ? 'book' : 'books'}${secs ? ` in ${secs} section${secs === 1 ? '' : 's'}` : ''}`);
+      } else parts.push(`${shelfNames}: nothing new`);
+      if (report.skipped) parts.push(`${report.skipped} already here`);
+      if (report.failed) parts.push(`${report.failed} could not be read`);
+      this.ui.toast(parts.join(' · '), 4200);
+      clearTimeout(this.importT);
+      this.importT = 0;
+      if (reading) this.libraryDirty = true;
+      else {
+        await this.loadLibrary(lastId || (this.currentMeta() && this.currentMeta().id));
+        const last = report.shelves[report.shelves.length - 1];
+        const ri = this.shelf.rows.findIndex((r) => r.shelfId === last.id);
+        if (ri >= 0 && ri !== this.shelf.r) this.shelf.goToRow(ri);
+      }
+    } finally {
+      this.importing = false;
+      clearTimeout(this.importT);
+      this.importT = 0;
+    }
+    if (loose && loose.name === '') await this.addFiles(loose.files);
+  }
+
+  /** While a folder comes in: stand the new books on the shelf every couple of seconds. */
+  importTick(id) {
+    if (this.reader.isOpen || this.importT) return;
+    this.importT = setTimeout(() => {
+      this.importT = 0;
+      if (this.reader.isOpen || this.shelf.lift) return;
+      const cur = this.currentMeta();
+      const r = this.shelf.r;
+      this.arrange(this.shelf.entries.length ? cur && cur.id : id, { animate: true });
+      if (this.shelf.r !== r && r < this.shelf.rows.length) this.shelf.goToRow(r);
+      this.ui.setCount(this.metas.length);
+    }, 1800);
+  }
+
   async addFiles(files) {
     if (this.importing) return;
     this.importing = true;
     try {
-      const res = await importFiles(files, this.metas, (i, n, name) =>
-        this.ui.toast(n > 1 ? `Adding ${i + 1} of ${n} — ${name}` : `Adding ${name}`, 60000),
+      // in the bookcase, new books go onto the shelf you are looking at
+      const shelfId = this.shelf.mode === 'case' ? this.shelf.row.shelfId : null;
+      const s = this.shelves.find((x) => x.id === shelfId);
+      const res = await importFiles(
+        files,
+        this.metas,
+        (i, n, name) => this.ui.toast(n > 1 ? `Adding ${i + 1} of ${n} — ${name}` : `Adding ${name}`, 60000),
+        { shelf: s ? s.id : null, shelfName: s ? s.name : null, order: this.sort === 'manual' ? Math.max(0, ...this.metas.map((m) => m.order || 0)) + 1024 : null },
       );
       const parts = [];
       if (res.added.length) parts.push(`Added ${res.added.length}`);
@@ -484,6 +812,10 @@ class App {
     input.addEventListener('change', () => {
       if (input.files && input.files.length) this.addFiles([...input.files]);
     });
+    const folder = document.getElementById('folder-input');
+    folder.addEventListener('change', () => {
+      if (folder.files && folder.files.length) this.addFolder([...folder.files]);
+    });
 
     c.addEventListener('pointerdown', (e) => this.onPointerDown(e));
     window.addEventListener('pointermove', (e) => this.onPointerMove(e));
@@ -516,7 +848,21 @@ class App {
       dragDepth = 0;
       drop.hidden = true;
       const files = [...(e.dataTransfer?.files || [])];
-      if (files.length) this.addFiles(files);
+      const items = e.dataTransfer?.items;
+      // a dropped folder becomes a shelf (the entries must be taken while the event lasts)
+      const walk = items && items.length && items[0].webkitGetAsEntry ? filesFromDrop(items) : null;
+      if (walk)
+        walk
+          .then(({ pairs, hasFolder }) => {
+            if (!hasFolder) return files.length && this.addFiles(files);
+            const paths = new Map(pairs);
+            return this.addFolder(
+              pairs.map((p) => p[0]),
+              (f) => paths.get(f),
+            );
+          })
+          .catch(() => files.length && this.addFiles(files));
+      else if (files.length) this.addFiles(files);
     });
   }
 
@@ -529,7 +875,10 @@ class App {
     if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
     if (this.ui.panelMode && e.pointerType !== 'mouse') this.ui.closePanel();
     if (this.reader.isOpen) this.ui.closePopovers();
-    else this.ui.toggleLightPop(false);
+    else {
+      this.ui.toggleLightPop(false);
+      this.ui.toggleArrangePop(false);
+    }
     if (this.magnifier.enabled && this.reader.isOpen && e.pointerType === 'touch' && !this.reader.tool) {
       this.lens = { id: e.pointerId };
       this.magnifier.point(e.clientX, e.clientY - 70, this.width, this.height);
@@ -540,7 +889,20 @@ class App {
       this.reader.pointerDown(e);
       return;
     }
-    this.shelfPointer = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now(), moved: false, lx: e.clientX, lt: performance.now(), vx: 0, type: e.pointerType };
+    const sp = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: performance.now(), moved: false, lx: e.clientX, ly: e.clientY, lt: performance.now(), vx: 0, vy: 0, type: e.pointerType, axis: null, lift: false };
+    this.shelfPointer = sp;
+    // press and hold a book to lift it and carry it to a new place
+    clearTimeout(this.liftTimer);
+    this.liftTimer = setTimeout(() => {
+      if (this.shelfPointer !== sp || sp.moved || this.reader.isOpen) return;
+      const hit = this.shelf.pick(this.ndc(sp.x0, sp.y0));
+      if (!hit || !hit.entry || hit.entry.row !== this.shelf.r) return;
+      if (this.shelf.liftStart(hit.entry, sp.x0)) {
+        sp.lift = true;
+        navigator.vibrate && navigator.vibrate(8);
+        if (this.sort !== 'manual') this.ui.toast('Carry it to its new place — the shelf switches to your own order', 2600);
+      }
+    }, this.liftMs || 430);
   }
 
   onPointerMove(e) {
@@ -562,16 +924,31 @@ class App {
     const sp = this.shelfPointer;
     if (sp && sp.id === e.pointerId) {
       const dx = e.clientX - sp.x0;
+      const dy = e.clientY - sp.y0;
       const now = performance.now();
       const dt = Math.max(1, now - sp.lt);
       sp.vx = sp.vx * 0.5 + (((e.clientX - sp.lx) / dt) * 1000) * 0.5;
+      sp.vy = sp.vy * 0.5 + (((e.clientY - sp.ly) / dt) * 1000) * 0.5;
       sp.lx = e.clientX;
+      sp.ly = e.clientY;
       sp.lt = now;
-      if (!sp.moved && Math.abs(dx) > 6) {
-        sp.moved = true;
-        this.shelf.dragStart();
+      if (sp.lift) {
+        this.shelf.liftMove(e.clientX);
+        return;
       }
-      if (sp.moved) this.shelf.dragMove(dx);
+      if (!sp.moved && Math.hypot(dx, dy) > 6) {
+        sp.moved = true;
+        clearTimeout(this.liftTimer);
+        this.clearPeek();
+        // up and down moves between the bookcase's shelves; sideways browses
+        sp.axis = this.shelf.mode === 'case' && Math.abs(dy) > Math.abs(dx) * 1.2 ? 'y' : 'x';
+        if (sp.axis === 'y') this.shelf.rowDragStart();
+        else this.shelf.dragStart();
+      }
+      if (sp.moved) {
+        if (sp.axis === 'y') this.shelf.rowDragMove(dy);
+        else this.shelf.dragMove(dx);
+      }
       return;
     }
     if (e.pointerType === 'mouse' && !e.buttons) this.shelfHover(e.clientX, e.clientY);
@@ -589,21 +966,74 @@ class App {
     const sp = this.shelfPointer;
     if (!sp || sp.id !== e.pointerId) return;
     this.shelfPointer = null;
+    clearTimeout(this.liftTimer);
+    if (sp.lift) {
+      this.placeLifted(this.shelf.liftEnd());
+      return;
+    }
     if (sp.moved) {
-      this.shelf.dragEnd(performance.now() - sp.lt > 80 ? 0 : sp.vx);
+      const still = performance.now() - sp.lt > 80;
+      if (sp.axis === 'y') this.shelf.rowDragEnd(still ? 0 : sp.vy);
+      else this.shelf.dragEnd(still ? 0 : sp.vx);
       return;
     }
     if (e.type === 'pointercancel') return;
-    // tap / click on the shelf: the face-out book opens; a spine is brought forward first
+    // tap / click on the shelf: the face-out book opens; a spine is brought forward first; a section's label
+    // brings that section; a shelf's name plate opens the shelf's settings
+    // a flag on the face-out book: the first tap raises it, a second opens the book there
+    const fh = this.shelf.pickFlag(e.clientX, e.clientY);
+    if (fh) return void this.flagTap(fh, 'shelf');
+    this.clearPeek();
     const hit = this.shelf.pick(this.ndc(e.clientX, e.clientY));
     if (!hit) return;
+    if (hit.tab) return void this.shelf.select(hit.tab.section.from);
+    if (hit.plate) return void this.ui.openShelfPanel(hit.plate.row);
+    if (hit.entry.row !== this.shelf.r) {
+      // a book on another shelf of the bookcase: go there
+      this.shelf.selectById(hit.entry.meta.id);
+      return;
+    }
     const i = this.shelf.entryIndex(hit.entry);
     if (i === this.shelf.selected && Math.abs(hit.entry.yaw) < 0.3) this.openSelected();
     else this.shelf.select(i);
   }
 
+  /** A carried book was put down: give it its place in your own order. */
+  placeLifted(res) {
+    if (!res) return Promise.resolve();
+    let changed;
+    // on your own shelves a book can be carried into another section
+    const meta = res.entry.meta;
+    const newSection = res.section !== undefined && (meta.section || '') !== res.section;
+    if (newSection) meta.section = res.section || null;
+    if (this.sort !== 'manual') {
+      // from now on the shelf keeps the order you make; start from what it shows (with the move)
+      const shown = [];
+      for (const r of this.shelf.rows) for (const e of r.entries) shown.push(e.meta);
+      const rest = this.metas.filter((m) => !shown.includes(m));
+      changed = seedManualOrder([...shown, ...rest]);
+      this.sort = 'manual';
+      this.reverse = false;
+      setPref('sort', this.sort);
+      setPref('reverse', '0');
+      this.ui.setSortLabel(this.arrangeLabel());
+    } else {
+      res.entry.meta.order = orderBetween(res.prev && res.prev.meta, res.next && res.next.meta);
+      changed = [res.entry.meta];
+    }
+    if (newSection && !changed.includes(meta)) changed.push(meta);
+    this.ui.setTitles(this.shelf.entries.map((x) => x.meta));
+    if (newSection) {
+      this.ui.toast(meta.section ? `In the section “${meta.section}”` : 'Out of its section', 1800);
+      // a section may have emptied: stand the shelf again from the books
+      this.arrange(meta.id, { animate: true });
+    }
+    this.invalidate();
+    return store.putBooks(changed).catch((e) => console.warn('save order', e));
+  }
+
   shelfHover(x, y) {
-    const hit = this.shelf.pick(this.ndc(x, y));
+    const hit = this.shelf.pickFlag(x, y) || this.shelf.pick(this.ndc(x, y));
     this.canvas.style.cursor = hit ? 'pointer' : 'default';
   }
 
@@ -613,6 +1043,13 @@ class App {
       this.reader.wheel(e);
       return;
     }
+    // in the bookcase, a vertical wheel moves between shelves (one shelf per gesture)
+    if (this.shelf.mode === 'case' && Math.abs(e.deltaY) > Math.abs(e.deltaX) * 1.5) {
+      const now = performance.now();
+      if (Math.abs(e.deltaY) > 4 && now - (this.rowWheelT || 0) > 380) this.shelf.stepRow(e.deltaY > 0 ? 1 : -1);
+      if (Math.abs(e.deltaY) > 4) this.rowWheelT = now;
+      return;
+    }
     const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
     this.shelf.wheel(e.deltaMode === 1 ? d * 30 : d);
   }
@@ -620,8 +1057,16 @@ class App {
   onKey(e) {
     const tag = (e.target && e.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (e.key === 'Escape' && this.peek) {
+      this.clearPeek();
+      return;
+    }
     if (e.key === 'Escape' && !document.getElementById('goto').hidden) {
       this.ui.toggleGoto(false);
+      return;
+    }
+    if (e.key === 'Escape' && !document.getElementById('arrange-pop').hidden) {
+      this.ui.toggleArrangePop(false);
       return;
     }
     if (e.key === 'Escape' && !document.getElementById('light-pop').hidden) {
@@ -658,6 +1103,13 @@ class App {
       case 'ArrowLeft':
         this.shelf.step(-1);
         e.preventDefault();
+        break;
+      case 'ArrowDown':
+      case 'ArrowUp':
+        if (this.shelf.mode === 'case') {
+          this.shelf.stepRow(e.key === 'ArrowDown' ? 1 : -1);
+          e.preventDefault();
+        }
         break;
       case 'Enter':
       case ' ':
@@ -730,13 +1182,15 @@ class App {
     if (this.pending && this.pending.id && !this.pending.page && !this.reader.isOpen) {
       const e = this.shelf.entries[this.shelf.selected];
       if (e && e.meta.id === this.pending.id && Math.abs(this.shelf.p - this.shelf.selected) < 0.02 && Math.abs(e.yaw) < 0.04) {
+        const at = this.pending.at ?? null;
         this.pending = null;
-        this.reader.open(e);
+        this.reader.open(e, { at });
       }
     }
 
     // titles follow the shelf
     this.ui.updateTitles(this.shelf.p, this.shelf.selected);
+    if (this.peek) this.placePeek();
 
     // camera: zoom/pan while reading
     const cam = this.camera;

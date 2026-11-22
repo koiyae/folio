@@ -12,13 +12,19 @@ function newId() {
 
 /**
  * Import files one at a time (keeps memory low on iPad).
- * @returns {Promise<{added: object[], skipped: string[], failed: string[]}>}
+ *   shelf, shelfName  put the new books on one of your shelves
+ *   sectionFor(file)  their section on it (a folder's subfolder), or null
+ *   onAdded(meta)     after each book is stored
+ * @returns {Promise<{added: object[], skipped: string[], failed: string[], known: {meta, file}[]}>}
+ *   known: files that were already in the library, with the book they are
  */
-export async function importFiles(files, existing, onProgress) {
+export async function importFiles(files, existing, onProgress, { shelf = null, shelfName = null, order = null, sectionFor = null, onAdded = null } = {}) {
   const added = [];
   const skipped = [];
   const failed = [];
-  const known = new Set(existing.map((m) => m.fingerprint).filter(Boolean));
+  const already = [];
+  const byPrint = new Map(existing.filter((m) => m.fingerprint).map((m) => [m.fingerprint, m]));
+  const known = new Set(byPrint.keys());
   const list = [...files];
   for (let i = 0; i < list.length; i++) {
     const file = list[i];
@@ -34,6 +40,7 @@ export async function importFiles(files, existing, onProgress) {
       const fp = `${(doc.fingerprints && doc.fingerprints[0]) || ''}:${file.size}`;
       if (known.has(fp)) {
         skipped.push(file.name);
+        if (byPrint.has(fp)) already.push({ meta: byPrint.get(fp), file });
         continue;
       }
       const m = await readMeta(doc, file.name);
@@ -61,10 +68,15 @@ export async function importFiles(files, existing, onProgress) {
         outline: outline.slice(0, 400),
         fingerprint: fp,
         look: chooseLook(id, m.title, analysis),
+        shelf,
+        shelfName,
+        section: (shelf && sectionFor && sectionFor(file)) || null,
+        ...(order != null ? { order: order + i } : {}),
       };
       await store.addBook(meta, new Blob([buf], { type: 'application/pdf' }), coverBlob);
       known.add(fp);
       added.push(meta);
+      onAdded && onAdded(meta);
     } catch (err) {
       console.error('import failed', file.name, err);
       failed.push(file.name);
@@ -72,7 +84,66 @@ export async function importFiles(files, existing, onProgress) {
       if (doc) doc.destroy();
     }
   }
-  return { added, skipped, failed };
+  return { added, skipped, failed, known: already };
+}
+
+// ------------------------------------------------------------------ folders
+const HIDDEN = (seg) => seg.startsWith('.') || seg === '__MACOSX';
+
+/**
+ * Sort a folder's files into shelves: the folder itself becomes a shelf (several dropped folders, several
+ * shelves) and each subfolder a section on it ("Ancient / Greek" for a folder inside a folder). Hidden files
+ * and macOS's "._" companions are left out. `pathOf(file)` gives "Folder/Sub/file.pdf".
+ * @returns {{ name: string, files: File[], sectionOf: Map<File, string|null> }[]}
+ */
+export function folderShelves(files, pathOf = (f) => f.webkitRelativePath || f.name) {
+  const out = new Map();
+  const isPdf = (f) => /pdf/i.test(f.type) || /\.pdf$/i.test(f.name);
+  const list = [...files]
+    .map((f) => ({ f, parts: pathOf(f).split('/').filter(Boolean) }))
+    .filter(({ f, parts }) => isPdf(f) && !parts.some(HIDDEN))
+    .sort((a, b) => collator.compare(a.parts.join('/'), b.parts.join('/')));
+  for (const { f, parts } of list) {
+    const name = parts.length > 1 ? parts[0] : '';
+    if (!out.has(name)) out.set(name, { name, files: [], sectionOf: new Map() });
+    const g = out.get(name);
+    g.files.push(f);
+    const sub = parts.slice(1, -1);
+    g.sectionOf.set(f, sub.length ? sub.join(' / ') : null);
+  }
+  return [...out.values()];
+}
+const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+
+/** Every file under the folders dropped on the page (desktop browsers), as [File, "Folder/Sub/file.pdf"]. */
+export async function filesFromDrop(items) {
+  const entries = [...items].map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null)).filter(Boolean);
+  const out = [];
+  const readAll = (dir) =>
+    new Promise((resolve) => {
+      const reader = dir.createReader();
+      const all = [];
+      const more = () =>
+        reader.readEntries(
+          (batch) => {
+            if (!batch.length) return resolve(all);
+            all.push(...batch);
+            more();
+          },
+          () => resolve(all),
+        );
+      more();
+    });
+  const walk = async (entry, path) => {
+    if (entry.isFile) {
+      const file = await new Promise((res) => entry.file(res, () => res(null)));
+      if (file) out.push([file, path + entry.name]);
+    } else if (entry.isDirectory && !HIDDEN(entry.name)) {
+      for (const child of await readAll(entry)) await walk(child, `${path}${entry.name}/`);
+    }
+  };
+  for (const e of entries) await walk(e, '');
+  return { pairs: out, hasFolder: entries.some((e) => e.isDirectory) };
 }
 
 /** Map a point in the book's page box (u across, v down) to PDF user space for this page. */

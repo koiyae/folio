@@ -1,9 +1,18 @@
-// The shelf: one row of books, spines to camera, the selected book turned face-out and pulled forward.
+// The shelf: books standing on a plank, spines to camera, the selected one turned face-out and pulled forward.
+//
+// What stands where comes from arrange.js: one row (optionally in sections, each named by a brass label on
+// the plank's edge) or a bookcase of rows, one per shelf, stacked — swipe up and down between them. Books keep
+// their 3D models when the arrangement changes and glide to their new places. A book can be lifted (press and
+// hold) and carried along its row to a new place.
 
 import * as THREE from 'three';
 import { BookModel, bookDims, makeBookMaterials, restyleBookMaterials, SHELF_SCALE } from './book3d.js';
 import { setBindingArt } from './binding.js';
 import { makeClothCoverCanvas, makeImageCoverCanvas, makeSpineCanvas, stampedTexture } from './textures.js';
+import { makeBookend, makeLabel, makePlank, PLANK_T } from './shelfdeco.js';
+import { flagsOf, shelfFlagMesh, Ribbon, shelfRibbonExit, layShelfRibbon, ribbonColor, flagScreenBox, pickBox } from './markers.js';
+
+const _E = new THREE.Vector3();
 import { clamp, smoothDamp, smoothstep } from './anim.js';
 import * as store from './store.js';
 
@@ -11,7 +20,17 @@ export const SHELF_Z = -36; // spine plane
 const FACE_PULL = 5; // face-out book comes forward this much
 const SPINE_GAP = 0.36;
 const FACE_GAP = 0.7;
+const SECTION_GAP = 2.6; // between sections of a row
 const S = SHELF_SCALE;
+export const BASE_Y = -9.35; // the plank's top: books stand on it
+export const ROW_SPACING = 24.5; // shelf to shelf in the bookcase
+const FRONT_Z = SHELF_Z + FACE_PULL + 0.55; // the plank's front edge, just in front of a face-out cover
+const BACK_Z = SHELF_Z - 14.2;
+const LABEL_H = 0.92;
+
+function newRow(src = {}) {
+  return { key: 'all', label: '', shelfId: null, entries: [], sections: null, editableSections: false, p: 0, pTarget: 0, pv: { v: 0 }, selected: -1, deco: null, ...src };
+}
 
 export class Shelf {
   constructor(app) {
@@ -19,10 +38,13 @@ export class Shelf {
     this.group = new THREE.Group();
     this.group.name = 'shelf';
     app.scene.add(this.group);
-    this.entries = [];
-    this.p = 0; // continuous position (book index at centre)
-    this.pTarget = 0;
-    this.pv = { v: 0 };
+    this.all = new Map(); // book id → entry, kept across arrangements
+    this.rows = [newRow()];
+    this.mode = 'row';
+    this.r = 0; // the current row (bookcase)
+    this.rowPos = 0; // where the bookcase stands (rows), eased
+    this.rowV = { v: 0 };
+    this.rowDragging = false;
     this.dragging = false;
     this.gliding = false;
     this.wheelTimer = 0;
@@ -30,31 +52,133 @@ export class Shelf {
     this.openGap = 0; // 0..1 how far the neighbours are pushed apart for an open book
     this.openGapWidth = 0; // world units each side
     this.hiddenEntry = null;
-    this.selected = -1;
     this.onSelect = null;
+    this.onRowChange = null;
     this.ghosts = [];
     this.raycaster = new THREE.Raycaster();
+    this.plankStyle = 'oak';
+    this.dark = false;
+    this.lift = null;
   }
 
-  // ------------------------------------------------------------------ building
-  async setBooks(metas, selectId) {
-    for (const e of this.entries) this.disposeEntry(e);
-    this.entries = [];
+  // the current row's state, under the names the rest of the app has always used
+  get row() {
+    return this.rows[this.r] || this.rows[0];
+  }
+  get entries() {
+    return this.row.entries;
+  }
+  get p() {
+    return this.row.p;
+  }
+  set p(v) {
+    this.row.p = v;
+  }
+  get pTarget() {
+    return this.row.pTarget;
+  }
+  set pTarget(v) {
+    this.row.pTarget = v;
+  }
+  get pv() {
+    return this.row.pv;
+  }
+  get selected() {
+    return this.row.selected;
+  }
+  set selected(v) {
+    this.row.selected = v;
+  }
+
+  // ------------------------------------------------------------------ arranging
+  /** Back-compat: one plain row of books. */
+  setBooks(metas, selectId) {
+    this.setLayout({ mode: 'row', rows: [{ key: 'all', label: '', metas, sections: null }] }, selectId);
+  }
+
+  /**
+   * Stand the books as `layout` says (see arrange.layout). Books already on the shelf keep their models and,
+   * with `animate`, glide from where they stood. `selectId`: the book to bring face-out.
+   */
+  setLayout(layout, selectId = null, { animate = false } = {}) {
+    const before = new Map();
+    if (animate) for (const [id, e] of this.all) if (e.slot.visible) before.set(id, e.slot.position.clone());
+    const prevRows = new Map(this.rows.map((r) => [r.key, r]));
+    const prevKey = this.row.key;
+    const prevSel = this.entries[this.selected];
+    const keep = new Set();
+    const rows = layout.rows.map((lr) => {
+      const entries = lr.metas.map((meta) => {
+        let e = this.all.get(meta.id);
+        if (e && (e.d.pages !== meta.pages || e.d.aspect !== bookDims(meta.pages, meta.aspect).aspect)) {
+          this.disposeEntry(e);
+          e = null;
+        }
+        if (!e) {
+          e = this.buildEntry(meta);
+          this.all.set(meta.id, e);
+        }
+        e.meta = meta;
+        keep.add(meta.id);
+        this.syncMarkers(e);
+        return e;
+      });
+      const old = prevRows.get(lr.key);
+      const row = newRow({
+        key: lr.key,
+        label: lr.label || '',
+        shelfId: lr.shelfId ?? null,
+        entries,
+        sections: lr.sections ? lr.sections.map((x) => ({ ...x })) : null,
+        editableSections: !!lr.editableSections,
+      });
+      // each shelf keeps its place; otherwise the selected book (or the start)
+      let idx = old ? clamp(Math.round(old.pTarget), 0, Math.max(0, entries.length - 1)) : 0;
+      const want = selectId || (prevSel && prevSel.meta.id);
+      const wi = want ? entries.findIndex((x) => x.meta.id === want) : -1;
+      if (wi >= 0 && (!old || selectId || prevKey === lr.key)) idx = wi;
+      row.p = row.pTarget = idx;
+      return row;
+    });
+    for (const [id, e] of this.all)
+      if (!keep.has(id) && e !== this.hiddenEntry) {
+        this.disposeEntry(e);
+        this.all.delete(id);
+      }
+    for (const r of this.rows) this.disposeDeco(r);
+    this.rows = rows.length ? rows : [newRow()];
+    this.mode = layout.mode;
+    // the current row: the one holding the book asked for, else the same shelf as before, else the first
+    let r = selectId ? this.rows.findIndex((x) => x.entries.some((e) => e.meta.id === selectId)) : -1;
+    if (r < 0) r = this.rows.findIndex((x) => x.key === prevKey);
+    if (r < 0) r = 0;
+    this.r = r;
+    this.rowPos = r;
+    this.rowV.v = 0;
+    this.lift = null;
+    // books not in the current row stand as spines from the start
+    this.rows.forEach((row, ri) =>
+      row.entries.forEach((e, i) => {
+        e.row = ri;
+        e.yaw = ri === r && i === Math.round(row.p) ? 0 : Math.PI / 2;
+        e.yawV.v = 0;
+        if (!animate) e.off = null;
+      }),
+    );
     this.clearGhosts();
-    for (const meta of metas) this.entries.push(this.buildEntry(meta));
-    let idx = Math.max(0, this.entries.findIndex((e) => e.meta.id === selectId));
-    if (!this.entries.length) {
-      this.buildGhosts();
-      idx = 0;
-    }
-    this.p = this.pTarget = idx;
-    this.selected = -1;
-    // settle yaws immediately
-    for (let i = 0; i < this.entries.length; i++) {
-      const e = this.entries[i];
-      e.yaw = i === idx ? 0 : Math.PI / 2;
-    }
+    if (!this.all.size) this.buildGhosts();
+    for (const row of this.rows) this.buildDeco(row);
     this.update(0, true);
+    if (animate)
+      for (const [id, old] of before) {
+        const e = this.all.get(id);
+        if (!e || !e.slot.visible) continue;
+        const off = old.sub(e.slot.position);
+        if (off.lengthSq() > 1e-4) e.off = off;
+      }
+    this.onRowChange && this.onRowChange(this.row);
+    const sel = this.entries[this.selected];
+    if (sel) this.onSelect && this.onSelect(sel, this.selected);
   }
 
   buildEntry(meta) {
@@ -71,8 +195,9 @@ export class Shelf {
     model.group.position.copy(d.center).multiplyScalar(-1);
     slot.add(model.group);
     this.group.add(slot);
-    const e = { meta, d, look, tex, mats, model, slot, yaw: Math.PI / 2, yawV: { v: 0 }, coverState: 'none', x: 0, z: SHELF_Z };
+    const e = { meta, d, look, tex, mats, model, slot, yaw: Math.PI / 2, yawV: { v: 0 }, coverState: 'none', x: 0, z: SHELF_Z, row: 0, off: null, marks: null };
     for (const m of model.pickables()) m.userData.entry = e;
+    this.syncMarkers(e);
     return e;
   }
 
@@ -102,7 +227,7 @@ export class Shelf {
     const total = widths.reduce((a, b) => a + b, 0);
     x = -total / 2;
     this.ghosts.forEach((g, i) => {
-      g.slot.position.set(x + widths[i] / 2, 0, SHELF_Z - (g.d.closedW * S) / 2);
+      g.slot.position.set(x + widths[i] / 2, BASE_Y + (g.d.Hc * S) / 2, SHELF_Z - (g.d.closedW * S) / 2);
       x += widths[i];
     });
   }
@@ -117,6 +242,7 @@ export class Shelf {
   }
 
   disposeEntry(e) {
+    this.clearMarkers(e);
     this.group.remove(e.slot);
     e.model.dispose();
     for (const k of ['cover', 'back', 'cloth', 'endpaper', 'spine']) e.mats[k].dispose();
@@ -126,9 +252,8 @@ export class Shelf {
 
   /** Re-render the generated textures of one book (after title/look edits). */
   refreshEntry(meta) {
-    const i = this.entries.findIndex((e) => e.meta.id === meta.id);
-    if (i < 0) return;
-    const e = this.entries[i];
+    const e = this.all.get(meta.id);
+    if (!e) return;
     e.meta = meta;
     e.look = meta.look;
     e.tex.spine.dispose();
@@ -137,6 +262,169 @@ export class Shelf {
     restyleBookMaterials(e.mats, meta.look);
     this.releaseCover(e);
     this.ensureCover(e);
+    this.syncMarkers(e);
+  }
+
+  // ------------------------------------------------------------------ ribbons and flags
+  /**
+   * A book's ribbon (a book you are reading: it marks your place, lying on the plank) and its flags (pages
+   * you marked or bookmarked, sticking out of the top). Rebuilt only when they change.
+   */
+  syncMarkers(e) {
+    const m = e.meta;
+    const s = m.spread || 0;
+    const hex = s > 0 && s < e.d.leaves ? ribbonColor(m.look) : null;
+    const flags = flagsOf(m);
+    const sig = `${hex}|${s}|${e.liftedFlag || ''}|${flags.map((f) => f.key + f.tone + f.u.toFixed(3)).join(',')}`;
+    if (e.marks && e.marks.sig === sig) return;
+    this.clearMarkers(e);
+    const marks = { sig, flags, ribbon: null, ribbonKey: '', flagMesh: null, items: [] };
+    if (hex) {
+      // the ribbon lies on the plank in the shelf's own space (see placeRibbon)
+      marks.ribbon = new Ribbon(hex, 18);
+      marks.ribbon.mesh.visible = false;
+      this.group.add(marks.ribbon.mesh);
+    }
+    const fm = shelfFlagMesh(e.d, flags, e.liftedFlag || null);
+    if (fm) {
+      marks.flagMesh = fm.mesh;
+      marks.items = fm.items;
+      e.model.group.add(fm.mesh);
+    }
+    e.marks = marks;
+    this.app.invalidate();
+  }
+
+  clearMarkers(e) {
+    const k = e.marks;
+    if (!k) return;
+    if (k.ribbon) {
+      this.group.remove(k.ribbon.mesh);
+      k.ribbon.dispose();
+    }
+    if (k.flagMesh) {
+      e.model.group.remove(k.flagMesh);
+      k.flagMesh.geometry.dispose();
+    }
+    e.marks = null;
+  }
+
+  /**
+   * A reading book's ribbon: out from under it, across the plank toward you, over the edge. Laid again only
+   * when the book has moved.
+   */
+  placeRibbon(e, rowY) {
+    const r = e.marks && e.marks.ribbon;
+    if (!r) return;
+    r.mesh.visible = e.slot.visible;
+    if (!r.mesh.visible) return;
+    const sp = e.slot.position;
+    const key = `${sp.x.toFixed(3)},${sp.y.toFixed(3)},${sp.z.toFixed(3)},${e.slot.rotation.y.toFixed(4)},${this.plankStyle}`;
+    if (key === e.marks.ribbonKey) return;
+    e.marks.ribbonKey = key;
+    e.slot.updateMatrixWorld(true);
+    shelfRibbonExit(e.d, e.meta.spread || 0, _E).applyMatrix4(e.model.group.matrixWorld);
+    const pl = this.plankUnder();
+    const drop = pl ? pl.drop : 0;
+    const sway = e.meta.id.charCodeAt(e.meta.id.length - 1) % 2 ? 1 : -1;
+    layShelfRibbon(r, _E, rowY + BASE_Y, FRONT_Z, drop, sway);
+  }
+
+  /** The plank of the shelf in view (an open book rests on it): { top, front, drop, style }, or null. */
+  plankUnder() {
+    if (this.plankStyle === 'none') return null;
+    const style = this.plankStyle;
+    return { top: (this.rowPos - this.r) * ROW_SPACING + BASE_Y, front: FRONT_Z, drop: style === 'glass' ? 0.75 : PLANK_T * 0.82, style };
+  }
+
+  /** Raise one flag of a book (a first tap on it), or lower it (key null). */
+  liftFlag(e, key) {
+    if (!e || (e.liftedFlag || null) === key) return;
+    e.liftedFlag = key;
+    this.syncMarkers(e);
+  }
+
+  /** The flags of the face-out book on screen: [{ flag, box }]. */
+  flagBoxes(e = this.entries[this.selected]) {
+    if (!e || !e.marks || !e.marks.items.length || !e.slot.visible || Math.abs(e.yaw) > 0.15) return [];
+    const app = this.app;
+    e.model.group.updateWorldMatrix(true, false);
+    const mw = new THREE.Matrix4();
+    // only what shows above the boards: a tap on the cover is a tap on the book
+    const above = (e.d.Hc - e.d.Hp) / 2 + 0.05;
+    return e.marks.items.map((it) => ({ flag: it.flag, box: flagScreenBox(mw.multiplyMatrices(e.model.group.matrixWorld, it.matrix), app.camera, app.width, app.height, above) }));
+  }
+
+  /** A flag of the face-out book under a tap: { entry, flag } or null. */
+  pickFlag(x, y) {
+    const e = this.entries[this.selected];
+    if (!e || this.lift || this.dragging) return null;
+    const hit = pickBox(this.flagBoxes(e), x, y, this.app.isTouch ? 10 : 4);
+    return hit ? { entry: e, flag: hit.flag } : null;
+  }
+
+  // ------------------------------------------------------------------ the furniture
+  /** Plank style ('none' | 'painted' | 'oak' | 'glass') and theme (the painted plank follows it). */
+  setPlank(style, dark) {
+    if (style === this.plankStyle && dark === this.dark) return;
+    this.plankStyle = style;
+    this.dark = dark;
+    for (const r of this.rows) {
+      this.disposeDeco(r);
+      this.buildDeco(r);
+    }
+    this.update(0, true);
+  }
+
+  buildDeco(row) {
+    const deco = { plank: makePlank(this.plankStyle, this.dark, BACK_Z, FRONT_Z), ends: [], labels: [] };
+    if (deco.plank) this.group.add(deco.plank);
+    if (row.entries.length) {
+      for (const side of [-1, 1]) {
+        const b = makeBookend(13);
+        if (side > 0) b.rotation.y = Math.PI;
+        this.group.add(b);
+        deco.ends.push(b);
+      }
+    }
+    // section labels (a row in sections, or the named sections of one of your shelves) and the shelf's name
+    // plate (the bookcase)
+    if (row.sections && (row.sections.length > 1 || row.editableSections)) {
+      row.sections.forEach((s, i) => {
+        if (!s.label) return; // a shelf's books outside any section stand first, unlabelled
+        const m = makeLabel(s.label, LABEL_H);
+        m.userData.tab = { section: i };
+        this.group.add(m);
+        deco.labels.push(m);
+      });
+    }
+    if (this.mode === 'case') {
+      const m = makeLabel(row.label || 'Shelf', LABEL_H * 1.15, { strong: true });
+      m.userData.plate = { row };
+      this.group.add(m);
+      deco.plate = m;
+    }
+    row.deco = deco;
+  }
+
+  disposeDeco(row) {
+    const d = row.deco;
+    if (!d) return;
+    if (d.plank) {
+      this.group.remove(d.plank);
+      d.plank.traverse((o) => o.geometry && o.geometry.dispose());
+      for (const m of d.plank.userData.mats) if (!m.map || !m.map.isCanvasTexture || m.map.image.width !== 1024) m.dispose();
+    }
+    for (const b of d.ends) this.group.remove(b);
+    for (const l of d.labels) {
+      this.group.remove(l);
+      l.userData.dispose();
+    }
+    if (d.plate) {
+      this.group.remove(d.plate);
+      d.plate.userData.dispose();
+    }
+    row.deco = null;
   }
 
   // ------------------------------------------------------------------ covers (lazy)
@@ -178,26 +466,27 @@ export class Shelf {
 
   /**
    * Where the reading lights stand while the shelf is showing (the same fields as Reader.lightLayout):
-   * around the face-out book, on the table in front of the shelf; windows and fire light the whole row.
+   * around the face-out book, on the plank in front of the shelf; windows and fire light the whole row.
    */
   lightLayout() {
     const app = this.app;
     const e = this.entries[this.selected];
     const d = e ? e.d : bookDims(300, 0.7);
     const front = SHELF_Z + FACE_PULL; // the face-out cover
+    const rowY = (this.rowPos - this.r) * ROW_SPACING;
     const halfWAt = (z) => Math.tan(((app.camera.fov * Math.PI) / 180) / 2) * (app.cameraBase.z - z) * (app.width / app.height);
     return {
       s: S,
       cx: app.cameraBase.x,
       edge: (d.closedW * S) / 2,
       span: halfWAt(SHELF_Z) * 0.75,
-      bottomY: (-d.Hc * S) / 2,
-      topY: (d.Hc * S) / 2,
+      bottomY: rowY + BASE_Y + 0.2,
+      topY: rowY + BASE_Y + d.Hc * S,
       nearZ: front,
       farZ: front - d.T * S,
       camX: app.cameraBase.x,
       halfWAt,
-      center: new THREE.Vector3(app.cameraBase.x, 0, front),
+      center: new THREE.Vector3(app.cameraBase.x, rowY + BASE_Y + (d.Hc * S) / 2, front),
       R: new THREE.Vector3(1, 0, 0),
       U: new THREE.Vector3(0, 1, 0),
       N: new THREE.Vector3(0, 0, 1),
@@ -219,6 +508,15 @@ export class Shelf {
       this.pv.v = 0;
     }
     this.app.invalidate();
+  }
+
+  /** Bring a book face-out, moving to its shelf first if it stands on another. */
+  selectById(id) {
+    const ri = this.rows.findIndex((r) => r.entries.some((e) => e.meta.id === id));
+    if (ri < 0) return false;
+    if (ri !== this.r) this.goToRow(ri);
+    this.select(this.entries.findIndex((e) => e.meta.id === id));
+    return true;
   }
 
   step(dir) {
@@ -261,47 +559,228 @@ export class Shelf {
     this.select(Math.round(this.pTarget + fling * 0.22));
   }
 
+  // the bookcase: up and down between shelves
+  get rowCount() {
+    return this.rows.length;
+  }
+  goToRow(ri) {
+    ri = clamp(Math.round(ri), 0, this.rows.length - 1);
+    if (ri === this.r) return;
+    // the shelf we leave turns its face-out book back to its spine
+    this.r = ri;
+    this.gliding = true;
+    this.onRowChange && this.onRowChange(this.row);
+    const sel = clamp(Math.round(this.row.p), 0, Math.max(0, this.entries.length - 1));
+    this.selected = -1; // re-announced by update
+    this.row.pTarget = sel;
+    this.app.invalidate();
+  }
+  stepRow(dir) {
+    this.goToRow(this.r + dir);
+  }
+  rowDragStart() {
+    this.rowDragging = true;
+    this.rowPos0 = this.rowPos;
+  }
+  rowDragMove(dyPx) {
+    if (!this.rowDragging) return;
+    const wpp = this.app.worldPerPx(SHELF_Z);
+    // the finger carries the bookcase: up shows the shelf below
+    this.rowPos = clamp(this.rowPos0 - (dyPx * wpp) / ROW_SPACING, -0.35, this.rows.length - 1 + 0.35);
+    this.app.invalidate();
+  }
+  rowDragEnd(vyPx) {
+    if (!this.rowDragging) return;
+    this.rowDragging = false;
+    const wpp = this.app.worldPerPx(SHELF_Z);
+    const fling = (-vyPx * wpp) / ROW_SPACING;
+    // a fifth of a shelf, or a flick, is enough to go to the next one
+    const moved = this.rowPos - this.r + clamp(fling * 0.25, -1, 1);
+    const target = Math.abs(moved) > 0.2 ? this.r + Math.sign(moved) * Math.max(1, Math.round(Math.abs(moved))) : this.r;
+    if (target !== this.r) this.goToRow(target);
+    this.app.invalidate();
+  }
+
+  // ------------------------------------------------------------------ lifting a book to move it
+  /** Press and hold: the book comes off the shelf and follows the finger along its row. */
+  liftStart(entry, clientX) {
+    const i = this.entries.indexOf(entry);
+    if (i < 0) return false;
+    this.lift = { entry, x: entry.x, edge: 0, start: i };
+    this.gliding = false;
+    this.app.invalidate();
+    return true;
+  }
+
+  liftMove(clientX) {
+    const L = this.lift;
+    if (!L) return;
+    const app = this.app;
+    L.x = (clientX - app.width / 2) * app.worldPerPx(SHELF_Z);
+    const f = clientX / app.width;
+    L.edge = f < 0.12 ? -1 : f > 0.88 ? 1 : 0;
+    this.reorderLifted();
+    app.invalidate();
+  }
+
+  /**
+   * Swap the lifted book past its neighbours as it is carried over them. It stays in its section, except on
+   * your own shelves, where carrying it over a section's first (or last) book moves it into that section.
+   */
+  reorderLifted() {
+    const L = this.lift;
+    const list = this.entries;
+    const secs = this.row.sections;
+    const secOf = (i) => (secs ? secs.findIndex((s) => i >= s.from && i < s.to) : 0);
+    const cross = this.row.editableSections && secs;
+    const me = L.entry;
+    for (let guard = 0; guard < 400; guard++) {
+      const i = list.indexOf(me);
+      const next = list[i + 1];
+      const prev = list[i - 1];
+      const a = secOf(i);
+      if (next && secOf(i + 1) === a && L.x > next.x) [list[i], list[i + 1]] = [next, list[i]];
+      else if (prev && secOf(i - 1) === a && L.x < prev.x) [list[i], list[i - 1]] = [prev, list[i]];
+      else if (cross && next && secOf(i + 1) !== a && L.x > (me.x + me.footprint / 2 + next.x - next.footprint / 2) / 2) {
+        // over the gap: it becomes the first book of the next section (skipping empty ones); one step a frame,
+        // so the gap has moved before it can go further
+        let b = a + 1;
+        while (b < secs.length - 1 && secs[b].to <= secs[b].from) b++;
+        secs[a].to--;
+        for (let k = a + 1; k <= b; k++) secs[k].from = i;
+        for (let k = a + 1; k < b; k++) secs[k].to = i;
+        L.moved = true;
+        break;
+      } else if (cross && prev && secOf(i - 1) !== a && L.x < (me.x - me.footprint / 2 + prev.x + prev.footprint / 2) / 2) {
+        let b = a - 1;
+        while (b > 0 && secs[b].to <= secs[b].from) b--;
+        secs[a].from++;
+        for (let k = b; k < a; k++) secs[k].to = i + 1;
+        for (let k = b + 1; k < a; k++) secs[k].from = i + 1;
+        L.moved = true;
+        break;
+      } else break;
+    }
+  }
+
+  /** The section (label) a book of the current row stands in. */
+  sectionOf(entry) {
+    const secs = this.row.sections;
+    const i = this.entries.indexOf(entry);
+    if (!secs || i < 0) return '';
+    const s = secs.find((x) => i >= x.from && i < x.to);
+    return s ? s.label : '';
+  }
+
+  /**
+   * Put it down. Returns { entry, prev, next, section } (its neighbours in its section now, and the section's
+   * name on your own shelves) if it moved.
+   */
+  liftEnd() {
+    const L = this.lift;
+    if (!L) return null;
+    this.lift = null;
+    const i = this.entries.indexOf(L.entry);
+    this.select(i);
+    this.app.invalidate();
+    if (i === L.start && !L.moved) return null;
+    const secs = this.row.sections;
+    const sec = secs ? secs.find((x) => i >= x.from && i < x.to) : null;
+    const inSec = (j) => !sec || (j >= sec.from && j < sec.to);
+    return {
+      entry: L.entry,
+      prev: inSec(i - 1) ? this.entries[i - 1] || null : null,
+      next: inSec(i + 1) ? this.entries[i + 1] || null : null,
+      section: this.row.editableSections ? (sec ? sec.label : '') : undefined,
+    };
+  }
+
   // ------------------------------------------------------------------ frame
   update(dt, force = false) {
-    const n = this.entries.length;
-    if (!n) return false;
     let moving = force;
-    const before = this.p;
-    if (dt > 0) this.p = smoothDamp(this.p, this.pTarget, this.pv, this.dragging ? 0.06 : this.gliding ? 0.22 : 0.12, dt);
-    if (Math.abs(this.p - before) > 1e-5) moving = true;
-    if (Math.abs(this.p - this.pTarget) < 0.0005 && Math.abs(this.pv.v) < 0.001) {
-      this.p = this.pTarget;
-      this.gliding = false;
+    // the bookcase eases to its shelf
+    if (!this.rowDragging) {
+      const before = this.rowPos;
+      this.rowPos = dt > 0 ? smoothDamp(this.rowPos, this.r, this.rowV, 0.26, dt) : this.r;
+      if (Math.abs(this.rowPos - this.r) < 0.0008 && Math.abs(this.rowV.v) < 0.002) this.rowPos = this.r;
+      if (Math.abs(this.rowPos - before) > 1e-6) moving = true;
+    } else moving = true;
+    // carrying a book to an edge scrolls the row under it
+    if (this.lift && this.lift.edge && dt > 0) {
+      this.pTarget = clamp(this.pTarget + this.lift.edge * dt * 7, 0, Math.max(0, this.entries.length - 1));
+      this.reorderLifted();
+      moving = true;
     }
-    const pc = clamp(this.p, 0, n - 1);
+    for (let ri = 0; ri < this.rows.length; ri++) if (this.updateRow(this.rows[ri], ri, dt)) moving = true;
+    // arranged books glide in from where they stood
+    for (const e of this.all.values())
+      if (e.off) {
+        e.off.multiplyScalar(dt > 0 ? Math.exp(-dt * 5.5) : 1);
+        if (e.off.lengthSq() < 1e-4) e.off = null;
+        else {
+          e.slot.position.add(e.off);
+          moving = true;
+        }
+      }
+    // ribbons lie where their books stand now
+    for (const e of this.all.values()) if (e.marks && e.marks.ribbon) this.placeRibbon(e, (this.rowPos - e.row) * ROW_SPACING);
+    return moving || this.dragging;
+  }
+
+  updateRow(row, ri, dt) {
+    const n = row.entries.length;
+    const current = ri === this.r;
+    const rowY = (this.rowPos - ri) * ROW_SPACING;
+    // the shelf below peeks in at the bottom; the one above stays out of the header until you go to it
+    const rel = ri - this.rowPos;
+    const visible = rel > -0.55 && rel < 1.7;
+    this.updateDeco(row, rowY, visible);
+    if (!n) return false;
+    let moving = false;
+    if (current) {
+      const before = row.p;
+      if (dt > 0) row.p = smoothDamp(row.p, row.pTarget, row.pv, this.dragging ? 0.06 : this.gliding ? 0.22 : 0.12, dt);
+      if (Math.abs(row.p - before) > 1e-5) moving = true;
+      if (Math.abs(row.p - row.pTarget) < 0.0005 && Math.abs(row.pv.v) < 0.001) {
+        row.p = row.pTarget;
+        this.gliding = false;
+      }
+    }
+    const pc = clamp(row.p, 0, n - 1);
 
     // selection follows the nearest book
-    const sel = clamp(Math.round(pc), 0, n - 1);
-    if (sel !== this.selected) {
-      this.selected = sel;
-      this.onSelect && this.onSelect(this.entries[sel], sel);
+    if (current) {
+      const sel = clamp(Math.round(pc), 0, n - 1);
+      if (sel !== row.selected) {
+        row.selected = sel;
+        this.onSelect && this.onSelect(row.entries[sel], sel);
+      }
     }
 
-    // yaws: face-out amount from distance to the continuous position
+    // yaws: face-out amount from distance to the continuous position (only on the current shelf, and not
+    // while a book is being carried)
     const smoothT = this.gliding ? 0.36 : this.dragging ? 0.12 : 0.2;
+    const faceAllowed = current && !this.lift;
     for (let i = 0; i < n; i++) {
-      const e = this.entries[i];
-      const f = smoothstep(0, 1, clamp(1 - Math.abs(i - pc), 0, 1));
+      const e = row.entries[i];
+      const f = faceAllowed ? smoothstep(0, 1, clamp(1 - Math.abs(i - pc), 0, 1)) : 0;
       const target = (Math.PI / 2) * (1 - f);
       const prev = e.yaw;
       e.yaw = dt > 0 ? smoothDamp(e.yaw, target, e.yawV, smoothT, dt) : target;
       if (Math.abs(e.yaw - prev) > 1e-5) moving = true;
-      // lazily hold covers for books near the centre
+      // lazily hold covers for books near the centre of the current shelf
       const dist = Math.abs(i - pc);
-      if (dist < 4.5) this.ensureCover(e);
-      else if (dist > 8 && e.coverState === 'ready') this.releaseCover(e);
+      if (current && dist < 4.5) this.ensureCover(e);
+      else if ((dist > 8 || !current) && e.coverState === 'ready' && Math.abs(ri - this.rowPos) > 1.2) this.releaseCover(e);
     }
 
-    // footprints
+    // footprints, with a gap between sections
+    const startsSection = new Set(row.sections ? row.sections.slice(1).map((s) => s.from) : []);
     let x = 0;
     const centers = new Array(n);
     for (let i = 0; i < n; i++) {
-      const e = this.entries[i];
+      const e = row.entries[i];
+      if (startsSection.has(i)) x += SECTION_GAP;
       const c = Math.cos(e.yaw);
       const s = Math.sin(e.yaw);
       const face = c; // 1 when face-out
@@ -314,9 +793,11 @@ export class Shelf {
     const i1 = Math.min(n - 1, i0 + 1);
     const fr = pc - i0;
     const cx = centers[i0] + (centers[i1] - centers[i0]) * fr;
-    const gap = this.openGapWidth * this.openGap;
+    const gap = current ? this.openGapWidth * this.openGap : 0;
+    const sel = row.selected;
     for (let i = 0; i < n; i++) {
-      const e = this.entries[i];
+      const e = row.entries[i];
+      e.row = ri;
       let xi = centers[i] - cx;
       if (gap > 0 && i !== sel) xi += i < sel ? -gap : gap;
       const face = Math.cos(e.yaw);
@@ -325,21 +806,97 @@ export class Shelf {
       const halfDepth = (Math.abs(Math.sin(e.yaw)) * e.d.closedW + Math.abs(face) * e.d.T) * 0.5 * S;
       e.x = xi;
       e.z = SHELF_Z + FACE_PULL * Math.max(0, face) - halfDepth;
-      e.slot.position.set(xi, 0, e.z);
+      let y = rowY + BASE_Y + (e.d.Hc * S) / 2;
+      let px = xi;
+      let pz = e.z;
+      if (this.lift && this.lift.entry === e) {
+        // carried: up off the plank, a little toward us, under the finger
+        px = this.lift.x;
+        y += 1.4;
+        pz += 2.4;
+        moving = true;
+      }
+      e.slot.position.set(px, y, pz);
       e.slot.rotation.y = e.yaw;
-      e.slot.visible = e !== this.hiddenEntry;
+      e.slot.visible = visible && e !== this.hiddenEntry;
     }
-    return moving || this.dragging;
+    // bookends hug the row's ends; section labels sit on the plank's edge under their sections
+    const d = row.deco;
+    if (d && d.ends.length) {
+      const first = row.entries[0];
+      const last = row.entries[n - 1];
+      const zMid = SHELF_Z - 6.4;
+      d.ends[0].position.set(first.x - first.footprint / 2 - 0.05, rowY + BASE_Y, zMid);
+      d.ends[1].position.set(last.x + last.footprint / 2 + 0.05, rowY + BASE_Y, zMid);
+      for (const b of d.ends) b.visible = visible;
+    }
+    if (d && d.labels.length) {
+      const yL = rowY + BASE_Y - (this.plankStyle === 'none' ? 0.7 : (d.plank ? d.plank.userData.thickness : 1.3) / 2);
+      d.labels.forEach((m) => {
+        const s = row.sections[m.userData.tab.section];
+        if (!s || s.to <= s.from) return void (m.visible = false);
+        const a = row.entries[s.from];
+        const b = row.entries[s.to - 1];
+        const x0 = a.x - a.footprint / 2;
+        const x1 = b.x + b.footprint / 2;
+        let mid = (x0 + x1) / 2;
+        // the shelf's name plate (at the screen's left edge) keeps its place: a label reaching under it slides
+        // right while it can stay under its own books, and steps aside when it can't
+        const pl = d.plate && d.plate.visible ? d.plate : null;
+        let hide = false;
+        if (pl) {
+          const half = m.userData.width / 2;
+          const clear = pl.position.x + pl.userData.width / 2 + 0.3 + half;
+          if (mid < clear && mid + half > pl.position.x - pl.userData.width / 2 - 0.3) {
+            if (clear - half < x1 - 0.4) mid = clear;
+            else hide = true;
+          }
+        }
+        m.position.set(mid, yL, FRONT_Z + 0.03);
+        m.visible = visible && !hide;
+      });
+    }
+    return moving;
+  }
+
+  updateDeco(row, rowY, visible) {
+    const d = row.deco;
+    if (!d) return;
+    if (d.plank) {
+      d.plank.position.y = rowY + BASE_Y;
+      d.plank.visible = visible;
+    }
+    if (d.plate) {
+      const app = this.app;
+      const halfW = Math.tan(((app.camera.fov * Math.PI) / 180) / 2) * (app.cameraBase.z - FRONT_Z) * (app.width / app.height);
+      const t = d.plank ? d.plank.userData.thickness : 1.3;
+      d.plate.position.set(app.cameraBase.x - halfW * 0.9 + d.plate.userData.width / 2, rowY + BASE_Y - (this.plankStyle === 'none' ? 0.8 : t / 2), FRONT_Z + 0.04);
+      d.plate.visible = visible && Math.abs(this.rows.indexOf(row) - this.rowPos) < 0.6;
+    }
+    if (!row.entries.length) for (const b of d.ends) b.visible = false;
   }
 
   // ------------------------------------------------------------------ picking
+  /** What is under the pointer: a book ({ entry }), a section label ({ tab }) or a shelf's plate ({ plate }). */
   pick(ndc) {
-    if (!this.entries.length) return null;
     this.raycaster.setFromCamera(ndc, this.app.camera);
     const objs = [];
-    for (const e of this.entries) if (e.slot.visible) objs.push(...e.model.pickables());
+    for (const row of this.rows) {
+      for (const e of row.entries) if (e.slot.visible) objs.push(...e.model.pickables());
+      if (row.deco) {
+        for (const l of row.deco.labels) if (l.visible) objs.push(l);
+        if (row.deco.plate && row.deco.plate.visible) objs.push(row.deco.plate);
+      }
+    }
     const hit = this.raycaster.intersectObjects(objs, false)[0];
-    return hit ? { entry: hit.object.userData.entry, object: hit.object, point: hit.point } : null;
+    if (!hit) return null;
+    const u = hit.object.userData;
+    if (u.tab) {
+      const row = this.rows.find((r) => r.deco && r.deco.labels.includes(hit.object));
+      return { tab: { row, section: row.sections[u.tab.section] } };
+    }
+    if (u.plate) return { plate: u.plate };
+    return { entry: u.entry, object: hit.object, point: hit.point };
   }
 
   /** Screen-space rectangle of the selected book's front cover. */

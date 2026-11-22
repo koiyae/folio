@@ -346,6 +346,12 @@ body[data-mode='reading'] .esc-hint {
   font-size: 14px;
   padding: 12px 6px;
 }
+#empty .empty-acts {
+  display: flex;
+  gap: 22px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
 #empty .hint-drop {
   font-family: var(--mono);
   font-size: 10px;
@@ -408,8 +414,71 @@ body[data-mode='reading'] .esc-hint {
   background: currentColor;
   transform: translateX(-50%);
 }
-#rb-bookmark[aria-pressed='true'] svg path {
+#rb-bookmark[aria-pressed='true'] svg path:not(.pole) {
   fill: currentColor;
+}
+/* back to the ribbon (shown while it keeps your place elsewhere) */
+.rb.back[hidden] {
+  display: none;
+}
+.rb.back {
+  letter-spacing: 0.03em;
+}
+.rb.back svg {
+  width: 11px;
+  height: 11px;
+}
+
+/* a raised flag's label: where it leads; tap again (or here) to go */
+#flag-tip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 7px 10px 6px;
+  background: var(--fg);
+  color: var(--bg);
+  font-family: var(--mono);
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: auto;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+#flag-tip.on {
+  opacity: 1;
+}
+#flag-tip[hidden] {
+  display: none;
+}
+#flag-tip .ft-p {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+#flag-tip .ft-h {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  opacity: 0.66;
+}
+#flag-tip::before {
+  content: '';
+  position: absolute;
+  top: 10px;
+  width: 0;
+  height: 0;
+  border: 5px solid transparent;
+}
+#flag-tip.right::before {
+  left: -10px;
+  border-right-color: var(--fg);
+}
+#flag-tip.left::before {
+  right: -10px;
+  border-left-color: var(--fg);
 }
 .readout {
   gap: 7px;
@@ -573,6 +642,113 @@ body[data-mode='reading'] .esc-hint {
 }
 #lp-toggle {
   font-size: 12px;
+}
+
+/* arranging the shelf: under the order button, top left */
+#arrange-pop {
+  position: fixed;
+  top: calc(var(--safe-t) + 80px);
+  left: calc(var(--gutter) + var(--safe-l));
+  z-index: 11;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  padding: 12px 16px 10px;
+  width: min(460px, 94vw);
+  max-height: calc(100vh - var(--safe-t) - var(--safe-b) - 100px);
+  overflow-y: auto;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+#arrange-pop[hidden],
+#arrange-pop [hidden] {
+  display: none;
+}
+.ap-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  margin-top: 10px;
+}
+.ap-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+}
+.ap-opts .mono-btn {
+  font-size: 10.5px;
+  padding: 7px 0;
+}
+.ap-opts [aria-checked='false'] {
+  opacity: 0.42;
+}
+.ap-shelves {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--soft);
+}
+.ap-shelves .list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ap-shelves .list li button.open {
+  flex: 1;
+}
+.ap-shelves .list li .mv {
+  font-family: var(--mono);
+  font-size: 12px;
+  width: 26px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--soft);
+  color: var(--muted);
+}
+.new-shelf-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 8px;
+}
+.ap-field {
+  flex: 1;
+  font: 14px var(--sans);
+  color: var(--fg);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--soft);
+  padding: 6px 0;
+  user-select: text;
+  -webkit-user-select: text;
+  border-radius: 0;
+}
+.ap-field:focus {
+  outline: none;
+  border-bottom-color: var(--fg);
+}
+#arrange-pop .note {
+  font-family: var(--sans);
+  font-size: 12.5px;
+  letter-spacing: 0;
+  line-height: 1.4;
+  color: var(--muted);
+  margin: 10px 0 2px;
+}
+.check-list li label {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--soft);
+  font: 15px var(--sans);
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.check-list li label .dim {
+  font-size: 12px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.check-list input {
+  accent-color: var(--fg);
 }
 
 /* header: the reading light, next to the theme */
@@ -1008,6 +1184,9 @@ body[data-mode='reading'] #empty {
   .top-right #count {
     display: none;
   }
+  .top-right {
+    gap: 12px;
+  }
   #marquee {
     top: calc(var(--safe-t) + 72px);
   }
@@ -1031,4 +1210,22 @@ body[data-mode='reading'] #empty {
   * {
     transition-duration: 0.01s !important;
   }
+}
+
+/* ribbon colours in a book's details: narrow silk swatches */
+.ribbon-seg {
+  align-items: center;
+}
+.cloths.ribbons {
+  gap: 7px;
+}
+.cloths.ribbons button {
+  width: 12px;
+  height: 30px;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 82%, 0 100%);
+}
+.cloths.ribbons button[aria-pressed='true'] {
+  outline: none;
+  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--fg);
+  clip-path: none;
 }
