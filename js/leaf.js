@@ -92,7 +92,7 @@ export function setPaperRoomLight(paper, k) {
  *    the light grazes the page, near the gutter and in a curl;
  *  - formation, fibres and specks in the albedo; ink a little smoother than paper; edges a touch toned;
  *  - a gutter that dives into the spine (wide shade + narrow crease) with warm light bounced off the facing page;
- *  - grain that lives mostly in the shadows.
+ *  - all texture lives on the paper and moves with it; only an invisible dither is tied to the screen.
  */
 export function makePageMaterial(paper) {
   const mat = new THREE.MeshStandardMaterial({
@@ -146,8 +146,11 @@ vec3 folioOther(vec2 uv, float bias) {
 vec4 folioOtherInk(vec2 uv) {
   return gl_FrontFacing ? texture2D(inkBack, uv) : texture2D(inkFront, uv);
 }
+// white noise without sin(): the sin-based hash turns into visible patterns on some mobile GPUs
 float folioHash(vec2 p) {
-  return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
 }`,
       )
       .replace(
@@ -246,16 +249,15 @@ diffuseColor.rgb *= col;`,
       .replace(
         '#include <opaque_fragment>',
         `{
-  // grain, coloured and mostly in the shadows
-  vec2 gc = gl_FragCoord.xy;
-  vec3 grain = vec3(folioHash(gc), folioHash(gc + 17.31), folioHash(gc + 41.77)) - 0.5;
-  float gLum = dot(outgoingLight, vec3(0.2126, 0.7152, 0.0722));
-  outgoingLight += grain * (0.45 + 0.55 * (1.0 - smoothstep(0.3, 1.2, gLum))) * 0.075;
+  // Dither by half a step of the 8-bit output, so dim gradients (candlelight, the gutter) don't band.
+  // It lives on the screen, not the paper, so it must stay below what the eye can see: anything
+  // stronger reads as a film over the screen that the pages slide under.
+  outgoingLight += (folioHash(gl_FragCoord.xy) - 0.5) / 255.0;
 }
 #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => 'folio-paper-5';
+  mat.customProgramCacheKey = () => 'folio-paper-6';
   return mat;
 }
 
