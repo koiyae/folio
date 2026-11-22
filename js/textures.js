@@ -238,7 +238,8 @@ function* slopeSteps(h, N, gain) {
  *   normal — slopes (R, G) + height (B) of the surface: fine fibre streaks lying along the grain (vertical),
  *            stronger in some patches than others, over a gentle cloudiness. Tile ≈ 9 cm of paper.
  *   fibre  — R: albedo (a percent or two of formation and fibre), G: formation density, which also decides
- *            how much light and show-through pass. Tile ≈ 18 cm, larger than the page.
+ *            how much light and show-through pass. Tile ≈ 18 cm, larger than the page. B: fine grain, read
+ *            at its own scale (≈8 texels/mm, about a screen pixel at reading distance).
  *   cockle — the slow waviness a printed sheet takes on: a few soft swells per page.
  */
 export function makePaperTextures() {
@@ -338,6 +339,7 @@ export function* paperTextureSteps() {
       [perlinTile(20, 16, r), 0.18],
     ];
     const img = ctx.createImageData(M, M);
+    const rn = rng(0.577); // the fine grain's own sequence, so the rest of the sheet stays as it was
     for (let y = 0; y < M; y++)
       for (let x = 0; x < M; x++) {
         const u = x / M;
@@ -349,7 +351,7 @@ export function* paperTextureSteps() {
         const i = (y * M + x) * 4;
         img.data[i] = clamp((0.5 + f * 0.09 + sh * 0.025) * 255, 0, 255);
         img.data[i + 1] = clamp((0.5 + f * 0.9) * 255, 0, 255);
-        img.data[i + 2] = 128;
+        img.data[i + 2] = ((rn() + rn()) / 2) * 255; // B: fine grain, sampled at its own, smaller scale
         img.data[i + 3] = 255;
         if (x === M - 1 && (y & 63) === 63) yield;
       }
@@ -580,6 +582,10 @@ export function makeDeferredPaperTextures() {
       if (!it.done) return void setTimeout(slice, 0);
       for (const k of ['normal', 'fibre', 'cockle']) {
         t[k].image = it.value[k].image;
+        // The stand-in may already be on the GPU at 2×2, in storage that can't grow: let it go, so the next
+        // use uploads the real map at its own size (without this the paper stayed flat grey whenever a
+        // book was opened before the maps were ready).
+        t[k].dispose();
         t[k].needsUpdate = true;
         it.value[k].dispose();
       }

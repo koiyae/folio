@@ -65,6 +65,8 @@ function paperUniforms(paper) {
       paperTint: { value: new THREE.Color(0xe9e8e4) },
       showThrough: { value: 0.24 }, // how much the far side's print darkens this side at rest
       toothK: { value: 0.22 }, // slope of the paper's fibre streaks and cloud
+      grainK: { value: 0.22 }, // the paper's fine grain in its colour (≈1 % of brightness on screen, zoomed in)
+      mottleK: { value: 0.08 }, // the fibre streaks and cloud of the surface, in its colour too
       cockleK: { value: 0.04 }, // slope of the sheet's slow waviness
       transmit: { value: 0.34 }, // diffuse transmittance of the sheet
       // a soft second light skimming the page from the upper left (in book space), so the paper's relief
@@ -90,7 +92,7 @@ export function setPaperRoomLight(paper, k) {
  *  - the surface: smooth, with faint fibre streaks along the grain (patchy, stronger in places) over a gentle
  *    cloudiness, from one large map per page so nothing repeats in view, and a slow cockle — it shows where
  *    the light grazes the page, near the gutter and in a curl;
- *  - formation, fibres and specks in the albedo; ink a little smoother than paper; edges a touch toned;
+ *  - formation, fibres, a fine grain and specks in the albedo; ink a little smoother than paper; edges toned;
  *  - a gutter that dives into the spine (wide shade + narrow crease) with warm light bounced off the facing page;
  *  - all texture lives on the paper and moves with it; only an invisible dither is tied to the screen.
  */
@@ -133,6 +135,8 @@ uniform vec2 paperSeed;
 uniform vec3 paperTint;
 uniform float showThrough;
 uniform float toothK;
+uniform float grainK;
+uniform float mottleK;
 uniform float cockleK;
 uniform float turnLift;
 uniform float transmit;
@@ -175,7 +179,13 @@ ghost = mix(ghost, vec3(dot(ghost, vec3(0.2126, 0.7152, 0.0722))), 0.35); // col
 float ghostK = showThrough * (1.0 + 0.6 * turnLift) * (1.3 - 0.6 * dens);
 vec3 col = pg * mix(vec3(1.0), ghost, ghostK);
 col *= mix(vec3(1.0), ink.rgb, ink.a);
-vec3 paperCol = paperTint * (0.82 + 0.36 * fb.r);
+// the surface map's place on this face (the far face is a different part of the sheet)
+vec2 folioTuv = vPageUv * paperRepeat + paperSeed + (gl_FrontFacing ? vec2(0.0) : vec2(0.53, 0.29));
+// texture you can see, all on the paper so it moves and turns with the page: formation and fibres,
+// a fine grain, and the surface's streaks and cloud
+float grainN = texture2D(paperFibre, folioTuv * 1.4 + paperSeed * 3.1).b;
+float mottle = texture2D(normalMap, folioTuv).b;
+vec3 paperCol = paperTint * (0.82 + 0.36 * fb.r) * (1.0 + (grainN - 0.5) * grainK + (mottle - 0.46) * mottleK);
 col *= paperCol;
 float folioLum = dot(pg, vec3(0.2126, 0.7152, 0.0722));
 // the gutter: a wide shade and a narrow crease where the sheet dives into the spine
@@ -201,8 +211,7 @@ diffuseColor.rgb *= col;`,
 {
   // fibres (the far face is a different part of the sheet) + cockle (the same swell, seen from behind)
   float asp = paperRepeat.y / paperRepeat.x;
-  vec2 tuv = vPageUv * paperRepeat + paperSeed + (gl_FrontFacing ? vec2(0.0) : vec2(0.53, 0.29));
-  vec2 tg = texture2D(normalMap, tuv).xy * 2.0 - 1.0;
+  vec2 tg = texture2D(normalMap, folioTuv).xy * 2.0 - 1.0;
   vec2 cg = texture2D(paperCockle, vPageUv * vec2(0.8, 0.8 * asp) + paperSeed.yx).xy * 2.0 - 1.0;
   if (!gl_FrontFacing) cg = -cg;
   vec2 g = tg * toothK + cg * cockleK;
@@ -257,7 +266,7 @@ diffuseColor.rgb *= col;`,
 #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => 'folio-paper-6';
+  mat.customProgramCacheKey = () => 'folio-paper-7';
   return mat;
 }
 
